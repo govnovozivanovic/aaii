@@ -1,5 +1,5 @@
 // ============================================================
-// Danik Assistant — прокси (GigaChat) с рассуждениями
+// Danik Assistant — прокси (GigaChat) с выбором модели
 // ============================================================
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -18,8 +18,8 @@ if (!GIGACHAT_CREDENTIALS) {
 
 const OAUTH_URL = 'https://ngw.devices.sberbank.ru:9443/api/v2/oauth';
 const API_URL = 'https://api.giga.chat/v1/chat/completions';
-const MODEL_DEFAULT = 'GigaChat-2-Pro';
-const MODEL_REASONING = 'GigaChat-2-Reasoning';
+const MODEL_BASE = 'GigaChat-2-Pro';
+const MODEL_ULTRA = 'GigaChat-3-Ultra';
 const MAX_HISTORY = 20;
 
 const CREATOR_INFO = `
@@ -111,7 +111,7 @@ async function getAccessToken() {
 }
 
 async function handleChat(body) {
-  const { botId, message, history, reasoningEnabled, blacklist } = body;
+  const { botId, message, history, modelType, blacklist } = body;
 
   if (!botId || !SYSTEM_PROMPTS[botId]) {
     return { status: 400, data: { error: 'Invalid botId' } };
@@ -142,19 +142,15 @@ async function handleChat(body) {
     return { status: 502, data: { error: 'Auth failed: ' + e.message } };
   }
 
-  const useReasoning = reasoningEnabled === true;
-  const model = useReasoning ? MODEL_REASONING : MODEL_DEFAULT;
+  const useUltra = modelType === 'ultra';
+  const model = useUltra ? MODEL_ULTRA : MODEL_BASE;
 
   const gigachatBody = {
     model,
     messages,
     stream: false,
-    max_tokens: useReasoning ? 8000 : 2000
+    max_tokens: 4000
   };
-
-  if (useReasoning) {
-    gigachatBody.reasoning_effort = 'medium';
-  }
 
   let gcResponse;
   try {
@@ -187,10 +183,7 @@ async function handleChat(body) {
     return { status: 502, data: { error: 'Invalid response' } };
   }
 
-  const choice = gcData?.choices?.[0];
-  const reply = choice?.message?.content;
-  const reasoning = choice?.message?.reasoning_content;
-
+  const reply = gcData?.choices?.[0]?.message?.content;
   if (!reply) {
     return { status: 502, data: { error: 'Empty reply', raw: gcData } };
   }
@@ -199,7 +192,6 @@ async function handleChat(body) {
     status: 200,
     data: {
       reply,
-      reasoning: reasoning || null,
       model: gcData.model || model,
       usage: gcData.usage || null
     }
@@ -231,7 +223,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/' || url.pathname === '/health') {
-    sendJson(res, 200, { status: 'ok', service: 'danik-assistant-proxy', provider: 'gigachat', runtime: 'node', reasoning: true });
+    sendJson(res, 200, { status: 'ok', service: 'danik-assistant-proxy', provider: 'gigachat', runtime: 'node' });
     return;
   }
 
@@ -257,6 +249,6 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[OK] Прокси запущен на порту ${PORT}`);
-  console.log(`[OK] Модель по умолчанию: ${MODEL_DEFAULT}`);
-  console.log(`[OK] Модель рассуждений: ${MODEL_REASONING}`);
+  console.log(`[OK] Base: ${MODEL_BASE}`);
+  console.log(`[OK] Ultra: ${MODEL_ULTRA}`);
 });
