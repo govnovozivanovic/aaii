@@ -19,7 +19,7 @@ if (!GIGACHAT_CREDENTIALS) {
 const OAUTH_URL = 'https://ngw.devices.sberbank.ru:9443/api/v2/oauth';
 const API_URL = 'https://api.giga.chat/v1/chat/completions';
 const MODEL_DEFAULT = 'GigaChat-2-Pro';
-const MODEL_REASONING = 'GigaChat-3-Ultra';
+const MODEL_REASONING = 'GigaChat-2-Reasoning';
 const MAX_HISTORY = 20;
 
 const CREATOR_INFO = `
@@ -148,11 +148,12 @@ async function handleChat(body) {
   const gigachatBody = {
     model,
     messages,
-    stream: false
+    stream: false,
+    max_tokens: useReasoning ? 8000 : 2000
   };
 
   if (useReasoning) {
-    gigachatBody.reasoning_effort = 'high';
+    gigachatBody.reasoning_effort = 'medium';
   }
 
   let gcResponse;
