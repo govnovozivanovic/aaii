@@ -1,5 +1,5 @@
 // ============================================================
-// Danik Assistant — прокси (GigaChat)
+// Danik Assistant — прокси (GigaChat) с рассуждениями
 // ============================================================
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -18,7 +18,8 @@ if (!GIGACHAT_CREDENTIALS) {
 
 const OAUTH_URL = 'https://ngw.devices.sberbank.ru:9443/api/v2/oauth';
 const API_URL = 'https://api.giga.chat/v1/chat/completions';
-const MODEL = 'GigaChat-2-Pro';
+const MODEL_DEFAULT = 'GigaChat-2-Pro';
+const MODEL_REASONING = 'GigaChat-3-Ultra';
 const MAX_HISTORY = 20;
 
 const CREATOR_INFO = `
@@ -110,7 +111,7 @@ async function getAccessToken() {
 }
 
 async function handleChat(body) {
-  const { botId, message, history, searchEnabled, blacklist } = body;
+  const { botId, message, history, reasoningEnabled, blacklist } = body;
 
   if (!botId || !SYSTEM_PROMPTS[botId]) {
     return { status: 400, data: { error: 'Invalid botId' } };
@@ -141,7 +142,18 @@ async function handleChat(body) {
     return { status: 502, data: { error: 'Auth failed: ' + e.message } };
   }
 
-  const gigachatBody = { model: MODEL, messages, stream: false };
+  const useReasoning = reasoningEnabled === true;
+  const model = useReasoning ? MODEL_REASONING : MODEL_DEFAULT;
+
+  const gigachatBody = {
+    model,
+    messages,
+    stream: false
+  };
+
+  if (useReasoning) {
+    gigachatBody.reasoning_effort = 'high';
+  }
 
   let gcResponse;
   try {
@@ -174,12 +186,23 @@ async function handleChat(body) {
     return { status: 502, data: { error: 'Invalid response' } };
   }
 
-  const reply = gcData?.choices?.[0]?.message?.content;
+  const choice = gcData?.choices?.[0];
+  const reply = choice?.message?.content;
+  const reasoning = choice?.message?.reasoning_content;
+
   if (!reply) {
     return { status: 502, data: { error: 'Empty reply', raw: gcData } };
   }
 
-  return { status: 200, data: { reply, model: gcData.model || MODEL, usage: gcData.usage || null } };
+  return {
+    status: 200,
+    data: {
+      reply,
+      reasoning: reasoning || null,
+      model: gcData.model || model,
+      usage: gcData.usage || null
+    }
+  };
 }
 
 function sendJson(res, status, data) {
@@ -207,7 +230,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/' || url.pathname === '/health') {
-    sendJson(res, 200, { status: 'ok', service: 'danik-assistant-proxy', provider: 'gigachat', runtime: 'node' });
+    sendJson(res, 200, { status: 'ok', service: 'danik-assistant-proxy', provider: 'gigachat', runtime: 'node', reasoning: true });
     return;
   }
 
@@ -233,5 +256,6 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[OK] Прокси запущен на порту ${PORT}`);
-  console.log(`[OK] Модель: ${MODEL}`);
+  console.log(`[OK] Модель по умолчанию: ${MODEL_DEFAULT}`);
+  console.log(`[OK] Модель рассуждений: ${MODEL_REASONING}`);
 });
