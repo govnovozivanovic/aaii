@@ -20,6 +20,7 @@ const OAUTH_URL = 'https://ngw.devices.sberbank.ru:9443/api/v2/oauth';
 const API_URL = 'https://api.giga.chat/v2/chat/completions';
 const MODEL_BASE = 'GigaChat-2-Pro';
 const MODEL_ULTRA = 'GigaChat-3-Ultra';
+const MODEL_SEARCH = 'GigaChat-2-Pro'; // модель для поиска
 const MAX_HISTORY = 20;
 
 const CREATOR_INFO = `
@@ -139,8 +140,13 @@ async function handleChat(body) {
     return { status: 502, data: { error: 'Auth failed: ' + e.message } };
   }
 
-  const useUltra = modelType === 'ultra';
-  const model = useUltra ? MODEL_ULTRA : MODEL_BASE;
+  // ВАЖНО: если включён поиск — всегда используем GigaChat-2-Pro
+  let model;
+  if (searchEnabled === true) {
+    model = MODEL_SEARCH;
+  } else {
+    model = (modelType === 'ultra') ? MODEL_ULTRA : MODEL_BASE;
+  }
 
   const gigachatBody = {
     model,
@@ -170,6 +176,9 @@ async function handleChat(body) {
   }
 
   const rawText = await gcResponse.text();
+
+  // Логируем полный ответ для отладки
+  console.log('[GIGACHAT RESPONSE]', gcResponse.status, rawText.slice(0, 1000));
 
   if (!gcResponse.ok) {
     return {
@@ -242,4 +251,5 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[OK] Прокси v2 запущен на порту ${PORT}`);
   console.log(`[OK] Base: ${MODEL_BASE}`);
   console.log(`[OK] Ultra: ${MODEL_ULTRA}`);
+  console.log(`[OK] Search: ${MODEL_SEARCH}`);
 });
