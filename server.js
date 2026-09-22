@@ -203,10 +203,10 @@ async function handleChat(body) {
 
   const userText = (message && message.trim()) ? message.trim() : 'Опиши, что на прикреплённом файле.';
 
-  // ===== КЛЮЧЕВОЕ: attachments кладём внутрь user-сообщения =====
+  // ===== ИСПРАВЛЕНИЕ: attachments — просто массив строк =====
   const userMessage = { role: 'user', content: userText };
   if (hasAttachments) {
-    userMessage.attachments = attachmentIds.map(id => ({ file_id: id }));
+    userMessage.attachments = attachmentIds; // было .map(id => ({ file_id: id }))
   }
   messages.push(userMessage);
 
@@ -217,14 +217,8 @@ async function handleChat(body) {
     return { status: 502, data: { error: 'Auth failed: ' + e.message } };
   }
 
-  // Для картинок и файлов используем Max (умеет vision), для остального — по флагу
   const useUltra = modelType === 'ultra';
-  let model;
-  if (useUltra) {
-    model = MODEL_ULTRA;
-  } else {
-    model = MODEL_BASE;
-  }
+  const model = useUltra ? MODEL_ULTRA : MODEL_BASE;
 
   const gigachatBody = {
     model,
@@ -232,7 +226,12 @@ async function handleChat(body) {
     max_tokens: 4000
   };
 
-  console.log('[REQ] model:', model, 'attachments:', hasAttachments ? attachmentIds.length : 0);
+  // ===== ИСПРАВЛЕНИЕ: включаем авторежим работы с функциями =====
+  if (hasAttachments) {
+    gigachatBody.function_call = 'auto';
+  }
+
+  console.log('[REQ] model:', model, 'attachments:', hasAttachments ? attachmentIds.length : 0, 'function_call:', hasAttachments ? 'auto' : 'off');
 
   let gcResponse;
   try {
