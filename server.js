@@ -20,7 +20,7 @@ const OAUTH_URL = 'https://ngw.devices.sberbank.ru:9443/api/v2/oauth';
 const API_URL = 'https://api.giga.chat/v2/chat/completions';
 const MODEL_BASE = 'GigaChat-2-Pro';
 const MODEL_ULTRA = 'GigaChat-3-Ultra';
-const MODEL_SEARCH = 'GigaChat-2-Pro'; // модель для поиска
+const MODEL_SEARCH = 'GigaChat-2-Pro'; // Модель для поиска
 const MAX_HISTORY = 20;
 
 const CREATOR_INFO = `
@@ -140,7 +140,7 @@ async function handleChat(body) {
     return { status: 502, data: { error: 'Auth failed: ' + e.message } };
   }
 
-  // ВАЖНО: если включён поиск — всегда используем GigaChat-2-Pro
+  // ВАЖНО: если включён поиск — используем модель для поиска
   let model;
   if (searchEnabled === true) {
     model = MODEL_SEARCH;
@@ -154,10 +154,12 @@ async function handleChat(body) {
     max_tokens: 4000
   };
 
+  // Ключевое исправление: добавляем tool_choice, чтобы модель знала, что инструмент можно использовать
   if (searchEnabled === true) {
     gigachatBody.tools = [
       { type: 'web_search' }
     ];
+    gigachatBody.tool_choice = 'auto'; // <-- ЭТО КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ
   }
 
   let gcResponse;
@@ -177,7 +179,6 @@ async function handleChat(body) {
 
   const rawText = await gcResponse.text();
 
-  // Логируем полный ответ для отладки
   console.log('[GIGACHAT RESPONSE]', gcResponse.status, rawText.slice(0, 1000));
 
   if (!gcResponse.ok) {
