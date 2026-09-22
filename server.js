@@ -1,5 +1,5 @@
 // ============================================================
-// Danik Assistant — прокси (GigaChat v2) с веб-поиском
+// Danik Assistant — прокси (GigaChat v2)
 // ============================================================
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -17,10 +17,9 @@ if (!GIGACHAT_CREDENTIALS) {
 }
 
 const OAUTH_URL = 'https://ngw.devices.sberbank.ru:9443/api/v2/oauth';
-const API_URL = 'https://api.giga.chat/v2/chat/completions';
+const API_URL = 'https://api.giga.chat/v1/chat/completions';
 const MODEL_BASE = 'GigaChat-2-Pro';
 const MODEL_ULTRA = 'GigaChat-3-Ultra';
-const MODEL_SEARCH = 'GigaChat-2-Pro'; // Модель для поиска
 const MAX_HISTORY = 20;
 
 const CREATOR_INFO = `
@@ -109,7 +108,7 @@ async function getAccessToken() {
 }
 
 async function handleChat(body) {
-  const { botId, message, history, modelType, searchEnabled, blacklist } = body;
+  const { botId, message, history, modelType, blacklist } = body;
 
   if (!botId || !SYSTEM_PROMPTS[botId]) {
     return { status: 400, data: { error: 'Invalid botId' } };
@@ -140,27 +139,14 @@ async function handleChat(body) {
     return { status: 502, data: { error: 'Auth failed: ' + e.message } };
   }
 
-  // ВАЖНО: если включён поиск — используем модель для поиска
-  let model;
-  if (searchEnabled === true) {
-    model = MODEL_SEARCH;
-  } else {
-    model = (modelType === 'ultra') ? MODEL_ULTRA : MODEL_BASE;
-  }
+  const useUltra = modelType === 'ultra';
+  const model = useUltra ? MODEL_ULTRA : MODEL_BASE;
 
   const gigachatBody = {
     model,
     messages,
     max_tokens: 4000
   };
-
-  // Ключевое исправление: добавляем tool_choice, чтобы модель знала, что инструмент можно использовать
-  if (searchEnabled === true) {
-    gigachatBody.tools = [
-      { type: 'web_search' }
-    ];
-    gigachatBody.tool_choice = 'auto'; // <-- ЭТО КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ
-  }
 
   let gcResponse;
   try {
@@ -178,8 +164,6 @@ async function handleChat(body) {
   }
 
   const rawText = await gcResponse.text();
-
-  console.log('[GIGACHAT RESPONSE]', gcResponse.status, rawText.slice(0, 1000));
 
   if (!gcResponse.ok) {
     return {
@@ -228,7 +212,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/' || url.pathname === '/health') {
-    sendJson(res, 200, { status: 'ok', service: 'danik-assistant-proxy', provider: 'gigachat', api: 'v2' });
+    sendJson(res, 200, { status: 'ok', service: 'danik-assistant-proxy', provider: 'gigachat', api: 'v1' });
     return;
   }
 
@@ -249,8 +233,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[OK] Прокси v2 запущен на порту ${PORT}`);
+  console.log(`[OK] Прокси запущен на порту ${PORT}`);
   console.log(`[OK] Base: ${MODEL_BASE}`);
   console.log(`[OK] Ultra: ${MODEL_ULTRA}`);
-  console.log(`[OK] Search: ${MODEL_SEARCH}`);
 });
