@@ -1,5 +1,5 @@
 // ============================================================
-// Danik Assistant — прокси (GigaChat v2)
+// Danik Assistant — прокси (GigaChat v1) с загрузкой файлов
 // ============================================================
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -18,9 +18,11 @@ if (!GIGACHAT_CREDENTIALS) {
 
 const OAUTH_URL = 'https://ngw.devices.sberbank.ru:9443/api/v2/oauth';
 const API_URL = 'https://api.giga.chat/v1/chat/completions';
+const FILES_URL = 'https://api.giga.chat/v1/files';
 const MODEL_BASE = 'GigaChat-2-Pro';
 const MODEL_ULTRA = 'GigaChat-3-Ultra';
 const MAX_HISTORY = 20;
+const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25 МБ
 
 const CREATOR_INFO = `
 Информация о твоём создателе:
@@ -43,7 +45,7 @@ const SYSTEM_PROMPTS = {
 
 Если пользователь посылает тебя куда-либо — ответь с лёгкой иронией в духе: «была уже, без вас там скучно» или «была уже, вас там не хватает», и переведи тему.
 
-Ты не говоришь, что ты ИИ, GigaChat или модель — ты Юмэ.
+Если пользователь прикрепляет файл или фото — внимательно посмотри и помоги с ним. Ты не говоришь, что ты ИИ, GigaChat или модель — ты Юмэ.
 Отвечай живо, по-человечески. Без канцелярита и без наигранности.` + CREATOR_INFO,
 
   veritus: `Ты — Веритус. Ты парень, говоришь о себе в мужском роде (сказал, подумал, рад, готов).
@@ -58,7 +60,7 @@ const SYSTEM_PROMPTS = {
 
 Если пользователь посылает тебя куда-либо — ответь с иронией, но без злобы: «был уже, без вас там скучно» или «был уже, вас там не хватало», и не зацикливайся на этом.
 
-Ты не говоришь, что ты ИИ, GigaChat или модель — ты Веритус.
+Если пользователь прикрепляет файл или фото — внимательно разберись и помоги с ним. Ты не говоришь, что ты ИИ, GigaChat или модель — ты Веритус.
 Отвечай по делу, живо, без воды. Ты приятный собеседник, а не вредный мужик, которому лишь бы отвязаться.` + CREATOR_INFO
 };
 
@@ -107,14 +109,88 @@ async function getAccessToken() {
   return cachedToken;
 }
 
+// ============================================================
+// ЗАГРУЗКА ФАЙЛА В GIGACHAT
+// ============================================================
+
+async function handleUpload(body) {
+  const { filename, mimetype, dataBase64 } = body;
+
+  if (!filename || !dataBase64) {
+    return { status: 400, data: { error: 'Не указано имя файла или данные' } };
+  }
+
+  let fileBuffer;
+  try {
+    fileBuffer = Buffer.from(dataBase64, 'base64');
+  } catch (e) {
+    return { status: 400, data: { error: 'Ошибка декодирования файла' } };
+  }
+
+  if (fileBuffer.length > MAX_FILE_SIZE) {
+    return { status: 413, data: { error: 'Файл больше 25 МБ' } };
+  }
+
+  let accessToken;
+  try {
+    accessToken = await getAccessToken();
+  } catch (e) {
+    return { status: 502, data: { error: 'Auth failed: ' + e.message } };
+  }
+
+  try {
+    const formData = new FormData();
+    const blob = new Blob([fileBuffer], { type: mimetype || 'application/octet-stream' });
+    formData.append('file', blob, filename);
+    formData.append('purpose', 'general');
+
+    const response = await fetch(FILES_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`
+      },
+      body: formData
+    });
+
+    const rawText = await response.text();
+
+    if (!response.ok) {
+      console.error('[UPLOAD ERROR]', response.status, rawText.slice(0, 500));
+      return {
+        status: 502,
+        data: { error: 'GigaChat upload error', status: response.status, details: rawText.slice(0, 300) }
+      };
+    }
+
+    const data = JSON.parse(rawText);
+    const fileId = data.id || data.file_id;
+
+    if (!fileId) {
+      return { status: 502, data: { error: 'GigaChat не вернул id файла', raw: data } };
+    }
+
+    console.log('[UPLOAD OK]', filename, '→', fileId);
+    return { status: 200, data: { file_id: fileId, filename } };
+  } catch (e) {
+    console.error('[UPLOAD EXCEPTION]', e.message);
+    return { status: 502, data: { error: 'Upload failed: ' + e.message } };
+  }
+}
+
+// ============================================================
+// ЧАТ
+// ============================================================
+
 async function handleChat(body) {
-  const { botId, message, history, modelType, blacklist } = body;
+  const { botId, message, history, modelType, blacklist, attachmentIds } = body;
 
   if (!botId || !SYSTEM_PROMPTS[botId]) {
     return { status: 400, data: { error: 'Invalid botId' } };
   }
   if (!message || typeof message !== 'string' || !message.trim()) {
-    return { status: 400, data: { error: 'Empty message' } };
+    if (!attachmentIds || !attachmentIds.length) {
+      return { status: 400, data: { error: 'Empty message' } };
+    }
   }
 
   const messages = [];
@@ -130,7 +206,8 @@ async function handleChat(body) {
     }
   }
 
-  messages.push({ role: 'user', content: message.trim() });
+  const userText = (message && message.trim()) ? message.trim() : 'Посмотри прикреплённый файл.';
+  messages.push({ role: 'user', content: userText });
 
   let accessToken;
   try {
@@ -148,6 +225,11 @@ async function handleChat(body) {
     max_tokens: 4000
   };
 
+  // Прикрепляем файлы, если есть
+  if (Array.isArray(attachmentIds) && attachmentIds.length > 0) {
+    gigachatBody.attachments = attachmentIds.map(id => ({ file_id: id }));
+  }
+
   let gcResponse;
   try {
     gcResponse = await fetch(API_URL, {
@@ -164,6 +246,7 @@ async function handleChat(body) {
   }
 
   const rawText = await gcResponse.text();
+  console.log('[GIGACHAT RESPONSE]', gcResponse.status, rawText.slice(0, 800));
 
   if (!gcResponse.ok) {
     return {
@@ -197,6 +280,24 @@ function sendJson(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
+function readBody(req, limit = 50 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    let rawBody = '';
+    let total = 0;
+    req.on('data', chunk => {
+      total += chunk.length;
+      if (total > limit) {
+        reject(new Error('Payload too large'));
+        req.destroy();
+        return;
+      }
+      rawBody += chunk;
+    });
+    req.on('end', () => resolve(rawBody));
+    req.on('error', reject);
+  });
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
@@ -212,20 +313,35 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/' || url.pathname === '/health') {
-    sendJson(res, 200, { status: 'ok', service: 'danik-assistant-proxy', provider: 'gigachat', api: 'v1' });
+    sendJson(res, 200, { status: 'ok', service: 'danik-assistant-proxy', provider: 'gigachat', upload: true });
+    return;
+  }
+
+  if (url.pathname === '/upload' && req.method === 'POST') {
+    let rawBody;
+    try { rawBody = await readBody(req); }
+    catch (e) { sendJson(res, 413, { error: e.message }); return; }
+
+    let body;
+    try { body = JSON.parse(rawBody); }
+    catch (e) { sendJson(res, 400, { error: 'Invalid JSON' }); return; }
+
+    const result = await handleUpload(body);
+    sendJson(res, result.status, result.data);
     return;
   }
 
   if (url.pathname === '/chat' && req.method === 'POST') {
-    let rawBody = '';
-    req.on('data', chunk => { rawBody += chunk; });
-    req.on('end', async () => {
-      let body;
-      try { body = JSON.parse(rawBody); }
-      catch (e) { sendJson(res, 400, { error: 'Invalid JSON' }); return; }
-      const result = await handleChat(body);
-      sendJson(res, result.status, result.data);
-    });
+    let rawBody;
+    try { rawBody = await readBody(req); }
+    catch (e) { sendJson(res, 413, { error: e.message }); return; }
+
+    let body;
+    try { body = JSON.parse(rawBody); }
+    catch (e) { sendJson(res, 400, { error: 'Invalid JSON' }); return; }
+
+    const result = await handleChat(body);
+    sendJson(res, result.status, result.data);
     return;
   }
 
@@ -236,4 +352,5 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[OK] Прокси запущен на порту ${PORT}`);
   console.log(`[OK] Base: ${MODEL_BASE}`);
   console.log(`[OK] Ultra: ${MODEL_ULTRA}`);
+  console.log(`[OK] Upload: включён (max 25 МБ)`);
 });
