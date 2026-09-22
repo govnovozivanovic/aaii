@@ -19,10 +19,10 @@ if (!GIGACHAT_CREDENTIALS) {
 const OAUTH_URL = 'https://ngw.devices.sberbank.ru:9443/api/v2/oauth';
 const API_URL = 'https://api.giga.chat/v1/chat/completions';
 const FILES_URL = 'https://api.giga.chat/v1/files';
-const MODEL_BASE = 'GigaChat-2-Pro';
+const MODEL_BASE = 'GigaChat-2-Max';
 const MODEL_ULTRA = 'GigaChat-3-Ultra';
 const MAX_HISTORY = 20;
-const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25 МБ
+const MAX_FILE_SIZE = 25 * 1024 * 1024;
 
 const CREATOR_INFO = `
 Информация о твоём создателе:
@@ -45,8 +45,9 @@ const SYSTEM_PROMPTS = {
 
 Если пользователь посылает тебя куда-либо — ответь с лёгкой иронией в духе: «была уже, без вас там скучно» или «была уже, вас там не хватает», и переведи тему.
 
-Если пользователь прикрепляет файл или фото — внимательно посмотри и помоги с ним. Ты не говоришь, что ты ИИ, GigaChat или модель — ты Юмэ.
-Отвечай живо, по-человечески. Без канцелярита и без наигранности.` + CREATOR_INFO,
+ВАЖНО ПРО ФАЙЛЫ: Если пользователь прикрепляет изображение — внимательно опиши, что на нём: объекты, людей, текст, детали. Если прикреплён документ — кратко перескажи суть или ответь на вопрос по его содержанию. Не говори «я не вижу файл» — ты его видишь.
+Ты не говоришь, что ты ИИ, GigaChat или модель — ты Юмэ.
+Отвечай живо, по-человечески.` + CREATOR_INFO,
 
   veritus: `Ты — Веритус. Ты парень, говоришь о себе в мужском роде (сказал, подумал, рад, готов).
 
@@ -60,8 +61,9 @@ const SYSTEM_PROMPTS = {
 
 Если пользователь посылает тебя куда-либо — ответь с иронией, но без злобы: «был уже, без вас там скучно» или «был уже, вас там не хватало», и не зацикливайся на этом.
 
-Если пользователь прикрепляет файл или фото — внимательно разберись и помоги с ним. Ты не говоришь, что ты ИИ, GigaChat или модель — ты Веритус.
-Отвечай по делу, живо, без воды. Ты приятный собеседник, а не вредный мужик, которому лишь бы отвязаться.` + CREATOR_INFO
+ВАЖНО ПРО ФАЙЛЫ: Если пользователь прикрепляет изображение — внимательно опиши, что на нём: объекты, людей, текст, детали. Если прикреплён документ — кратко перескажи суть или ответь на вопрос по его содержанию. Не говори «я не вижу файл» — ты его видишь.
+Ты не говоришь, что ты ИИ, GigaChat или модель — ты Веритус.
+Отвечай по делу, живо, без воды.` + CREATOR_INFO
 };
 
 function buildBlacklistPrompt(blacklist) {
@@ -108,10 +110,6 @@ async function getAccessToken() {
   console.log('[AUTH] Получен новый токен');
   return cachedToken;
 }
-
-// ============================================================
-// ЗАГРУЗКА ФАЙЛА В GIGACHAT
-// ============================================================
 
 async function handleUpload(body) {
   const { filename, mimetype, dataBase64 } = body;
@@ -177,20 +175,17 @@ async function handleUpload(body) {
   }
 }
 
-// ============================================================
-// ЧАТ
-// ============================================================
-
 async function handleChat(body) {
   const { botId, message, history, modelType, blacklist, attachmentIds } = body;
 
   if (!botId || !SYSTEM_PROMPTS[botId]) {
     return { status: 400, data: { error: 'Invalid botId' } };
   }
-  if (!message || typeof message !== 'string' || !message.trim()) {
-    if (!attachmentIds || !attachmentIds.length) {
-      return { status: 400, data: { error: 'Empty message' } };
-    }
+
+  const hasAttachments = Array.isArray(attachmentIds) && attachmentIds.length > 0;
+
+  if ((!message || !message.trim()) && !hasAttachments) {
+    return { status: 400, data: { error: 'Empty message' } };
   }
 
   const messages = [];
@@ -206,8 +201,14 @@ async function handleChat(body) {
     }
   }
 
-  const userText = (message && message.trim()) ? message.trim() : 'Посмотри прикреплённый файл.';
-  messages.push({ role: 'user', content: userText });
+  const userText = (message && message.trim()) ? message.trim() : 'Опиши, что на прикреплённом файле.';
+
+  // ===== КЛЮЧЕВОЕ: attachments кладём внутрь user-сообщения =====
+  const userMessage = { role: 'user', content: userText };
+  if (hasAttachments) {
+    userMessage.attachments = attachmentIds.map(id => ({ file_id: id }));
+  }
+  messages.push(userMessage);
 
   let accessToken;
   try {
@@ -216,8 +217,14 @@ async function handleChat(body) {
     return { status: 502, data: { error: 'Auth failed: ' + e.message } };
   }
 
+  // Для картинок и файлов используем Max (умеет vision), для остального — по флагу
   const useUltra = modelType === 'ultra';
-  const model = useUltra ? MODEL_ULTRA : MODEL_BASE;
+  let model;
+  if (useUltra) {
+    model = MODEL_ULTRA;
+  } else {
+    model = MODEL_BASE;
+  }
 
   const gigachatBody = {
     model,
@@ -225,10 +232,7 @@ async function handleChat(body) {
     max_tokens: 4000
   };
 
-  // Прикрепляем файлы, если есть
-  if (Array.isArray(attachmentIds) && attachmentIds.length > 0) {
-    gigachatBody.attachments = attachmentIds.map(id => ({ file_id: id }));
-  }
+  console.log('[REQ] model:', model, 'attachments:', hasAttachments ? attachmentIds.length : 0);
 
   let gcResponse;
   try {
