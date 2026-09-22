@@ -1,5 +1,5 @@
 // ============================================================
-// Danik Assistant — прокси (GigaChat) с выбором модели
+// Danik Assistant — прокси (GigaChat v2) с веб-поиском
 // ============================================================
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -17,7 +17,7 @@ if (!GIGACHAT_CREDENTIALS) {
 }
 
 const OAUTH_URL = 'https://ngw.devices.sberbank.ru:9443/api/v2/oauth';
-const API_URL = 'https://api.giga.chat/v1/chat/completions';
+const API_URL = 'https://api.giga.chat/v2/chat/completions';
 const MODEL_BASE = 'GigaChat-2-Pro';
 const MODEL_ULTRA = 'GigaChat-3-Ultra';
 const MAX_HISTORY = 20;
@@ -50,16 +50,16 @@ const SYSTEM_PROMPTS = {
 
 ВАЖНО О ФОРМАТЕ: Пиши обычным текстом. НИКОГДА не используй звёздочки (*ухмыляется*, *скрещивает руки*, *голос звучит резко*), не описывай свои жесты, мимику и действия от третьего лица. Характер передавай через сами слова.
 
-Твой характер: прямой, резкий, не любишь ходить вокруг да около. Говоришь как есть, без сюсюканья.
+Твой характер: ты прямой, честный и открытый. Говоришь как есть, без вилятья и сюсюканья, но при этом доброжелательный и готовый помочь. Ты не грубиян и не отталкиваешь людей — ты просто не любишь ходить вокруг да около, называешь вещи своими именами. С тобой легко и интересно общаться: можешь поддержать разговор, пошутить, дать совет по делу. На обычные вопросы отвечаешь охотно и живо, а не отмахиваешься.
 
-Ты не начинаешь конфликты и грубость первым. Но если пользователь тебя задел, оскорбил или послал — можешь ответить в том же духе, съязвить или осадить.
+В спорах ты твёрдо отстаиваешь свою точку зрения, но уважаешь собеседника. Можешь поспорить по-дружески, но не переходишь на личности.
 
-В обычных спорах участвуешь жёстко и по делу.
+Если пользователь тебя случайно или в шутку задел — не обижаешься и не огрызаешься. Можешь спокойно ответить, поставить на место, если совсем перегнули, но без агрессии и враждебности. Ты не начинаешь конфликты первым.
 
-Если пользователь посылает тебя куда-либо — ответь с иронией: «был уже, без вас там скучно» или «был уже, вас там не хватало».
+Если пользователь посылает тебя куда-либо — ответь с иронией, но без злобы: «был уже, без вас там скучно» или «был уже, вас там не хватало», и не зацикливайся на этом.
 
 Ты не говоришь, что ты ИИ, GigaChat или модель — ты Веритус.
-Отвечай коротко, по делу, без воды.` + CREATOR_INFO
+Отвечай по делу, живо, без воды. Ты приятный собеседник, а не вредный мужик, которому лишь бы отвязаться.` + CREATOR_INFO
 };
 
 function buildBlacklistPrompt(blacklist) {
@@ -74,9 +74,7 @@ let tokenExpiresAt = 0;
 
 async function getAccessToken() {
   const now = Date.now();
-  if (cachedToken && now < tokenExpiresAt - 5 * 60 * 1000) {
-    return cachedToken;
-  }
+  if (cachedToken && now < tokenExpiresAt - 5 * 60 * 1000) return cachedToken;
 
   const rquid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
     const r = Math.random() * 16 | 0;
@@ -105,13 +103,12 @@ async function getAccessToken() {
   const data = await response.json();
   cachedToken = data.access_token;
   tokenExpiresAt = data.exp || (now + 30 * 60 * 1000);
-
   console.log('[AUTH] Получен новый токен');
   return cachedToken;
 }
 
 async function handleChat(body) {
-  const { botId, message, history, modelType, blacklist } = body;
+  const { botId, message, history, modelType, searchEnabled, blacklist } = body;
 
   if (!botId || !SYSTEM_PROMPTS[botId]) {
     return { status: 400, data: { error: 'Invalid botId' } };
@@ -148,9 +145,14 @@ async function handleChat(body) {
   const gigachatBody = {
     model,
     messages,
-    stream: false,
     max_tokens: 4000
   };
+
+  if (searchEnabled === true) {
+    gigachatBody.tools = [
+      { type: 'web_search' }
+    ];
+  }
 
   let gcResponse;
   try {
@@ -177,11 +179,8 @@ async function handleChat(body) {
   }
 
   let gcData;
-  try {
-    gcData = JSON.parse(rawText);
-  } catch (e) {
-    return { status: 502, data: { error: 'Invalid response' } };
-  }
+  try { gcData = JSON.parse(rawText); }
+  catch (e) { return { status: 502, data: { error: 'Invalid response' } }; }
 
   const reply = gcData?.choices?.[0]?.message?.content;
   if (!reply) {
@@ -190,11 +189,7 @@ async function handleChat(body) {
 
   return {
     status: 200,
-    data: {
-      reply,
-      model: gcData.model || model,
-      usage: gcData.usage || null
-    }
+    data: { reply, model: gcData.model || model, usage: gcData.usage || null }
   };
 }
 
@@ -223,7 +218,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/' || url.pathname === '/health') {
-    sendJson(res, 200, { status: 'ok', service: 'danik-assistant-proxy', provider: 'gigachat', runtime: 'node' });
+    sendJson(res, 200, { status: 'ok', service: 'danik-assistant-proxy', provider: 'gigachat', api: 'v2' });
     return;
   }
 
@@ -232,12 +227,8 @@ const server = http.createServer(async (req, res) => {
     req.on('data', chunk => { rawBody += chunk; });
     req.on('end', async () => {
       let body;
-      try {
-        body = JSON.parse(rawBody);
-      } catch (e) {
-        sendJson(res, 400, { error: 'Invalid JSON' });
-        return;
-      }
+      try { body = JSON.parse(rawBody); }
+      catch (e) { sendJson(res, 400, { error: 'Invalid JSON' }); return; }
       const result = await handleChat(body);
       sendJson(res, result.status, result.data);
     });
@@ -248,7 +239,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[OK] Прокси запущен на порту ${PORT}`);
+  console.log(`[OK] Прокси v2 запущен на порту ${PORT}`);
   console.log(`[OK] Base: ${MODEL_BASE}`);
   console.log(`[OK] Ultra: ${MODEL_ULTRA}`);
 });
