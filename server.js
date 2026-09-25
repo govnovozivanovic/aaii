@@ -10,7 +10,6 @@ const { URL } = require('url');
 
 const PORT = process.env.PORT || 3000;
 
-// ===== ENV =====
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const GIGACHAT_CREDENTIALS = process.env.GIGACHAT_CREDENTIALS;
@@ -20,7 +19,6 @@ if (!SUPABASE_URL) { console.error('[FATAL] SUPABASE_URL не задан'); proc
 if (!SUPABASE_KEY) { console.error('[FATAL] SUPABASE_KEY не задан'); process.exit(1); }
 if (!GIGACHAT_CREDENTIALS) { console.error('[FATAL] GIGACHAT_CREDENTIALS не задан'); process.exit(1); }
 
-// ===== КОНСТАНТЫ =====
 const OAUTH_URL = 'https://ngw.devices.sberbank.ru:9443/api/v2/oauth';
 const API_URL = 'https://api.giga.chat/v1/chat/completions';
 const FILES_URL = 'https://api.giga.chat/v1/files';
@@ -30,14 +28,12 @@ const MAX_HISTORY = 20;
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
 const SESSION_DAYS = 30;
 
-// Лимиты по тарифам
 const TARIFF_LIMITS = {
   base:     { ultra: 150,       images: 5          },
   pro:      { ultra: Infinity,  images: 50         },
   ultimate: { ultra: Infinity,  images: Infinity   }
 };
 
-// ===== ПРОМПТЫ =====
 const CREATOR_INFO = `
 Информация о твоём создателе:
 Тебя создал Даник (полное имя — Даниэль).
@@ -88,11 +84,11 @@ function buildBlacklistPrompt(blacklist) {
 }
 
 // ============================================================
-// SUPABASE REST API (через fetch, без библиотеки)
+// SUPABASE REST
 // ============================================================
 
-async function sbFetch(path, options = {}) {
-  const url = `${SUPABASE_URL}/rest/v1/${path}`;
+async function sbFetch(p, options = {}) {
+  const url = `${SUPABASE_URL}/rest/v1/${p}`;
   const headers = {
     'apikey': SUPABASE_KEY,
     'Authorization': `Bearer ${SUPABASE_KEY}`,
@@ -101,126 +97,73 @@ async function sbFetch(path, options = {}) {
   };
   const resp = await fetch(url, { ...options, headers });
   const text = await resp.text();
-  if (!resp.ok) {
-    throw new Error(`Supabase ${resp.status}: ${text.slice(0, 300)}`);
-  }
+  if (!resp.ok) throw new Error(`Supabase ${resp.status}: ${text.slice(0, 300)}`);
   return text ? JSON.parse(text) : null;
 }
-
-async function sbSelect(table, filter) {
-  return sbFetch(`${table}?${filter}`);
-}
-
-async function sbInsert(table, data) {
-  return sbFetch(table, {
-    method: 'POST',
-    headers: { 'Prefer': 'return=representation' },
-    body: JSON.stringify(data)
-  });
-}
-
-async function sbUpdate(table, filter, data) {
-  return sbFetch(`${table}?${filter}`, {
-    method: 'PATCH',
-    headers: { 'Prefer': 'return=representation' },
-    body: JSON.stringify(data)
-  });
-}
-
-async function sbDelete(table, filter) {
-  return sbFetch(`${table}?${filter}`, { method: 'DELETE' });
-}
+async function sbSelect(t, f) { return sbFetch(`${t}?${f}`); }
+async function sbInsert(t, d) { return sbFetch(t, { method: 'POST', headers: { 'Prefer': 'return=representation' }, body: JSON.stringify(d) }); }
+async function sbUpdate(t, f, d) { return sbFetch(`${t}?${f}`, { method: 'PATCH', headers: { 'Prefer': 'return=representation' }, body: JSON.stringify(d) }); }
+async function sbDelete(t, f) { return sbFetch(`${t}?${f}`, { method: 'DELETE' }); }
 
 // ============================================================
-// ПАРОЛЬ И ТОКЕНЫ
+// УТИЛИТЫ
 // ============================================================
 
-function hashPassword(password, salt) {
-  return crypto.createHash('sha256').update(salt + ':' + password).digest('hex');
-}
-
-function generateSalt() {
-  return crypto.randomBytes(16).toString('hex');
-}
-
-function generateToken() {
-  return crypto.randomBytes(32).toString('hex');
-}
-
-// ============================================================
-// ПОЛЬЗОВАТЕЛИ
-// ============================================================
+function hashPassword(p, s) { return crypto.createHash('sha256').update(s + ':' + p).digest('hex'); }
+function generateSalt() { return crypto.randomBytes(16).toString('hex'); }
+function generateToken() { return crypto.randomBytes(32).toString('hex'); }
 
 async function getCurrentMonthStart() {
   const now = new Date();
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
-    .toISOString().slice(0, 10); // YYYY-MM-DD
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString().slice(0, 10);
 }
 
-async function getUserByUsername(username) {
-  const res = await sbSelect('users', `username=eq.${encodeURIComponent(username)}&limit=1`);
-  return res && res[0] ? res[0] : null;
+async function getUserByUsername(u) {
+  const r = await sbSelect('users', `username=eq.${encodeURIComponent(u)}&limit=1`);
+  return r && r[0] ? r[0] : null;
 }
 
-async function getUserByToken(token) {
-  const sessions = await sbSelect('sessions', `token=eq.${encodeURIComponent(token)}&limit=1`);
-  if (!sessions || !sessions[0]) return null;
-  const session = sessions[0];
-  if (new Date(session.expires_at) < new Date()) {
-    await sbDelete('sessions', `token=eq.${encodeURIComponent(token)}`);
+async function getUserByToken(t) {
+  const s = await sbSelect('sessions', `token=eq.${encodeURIComponent(t)}&limit=1`);
+  if (!s || !s[0]) return null;
+  if (new Date(s[0].expires_at) < new Date()) {
+    await sbDelete('sessions', `token=eq.${encodeURIComponent(t)}`);
     return null;
   }
-  const users = await sbSelect('users', `id=eq.${session.user_id}&limit=1`);
-  return users && users[0] ? users[0] : null;
+  const u = await sbSelect('users', `id=eq.${s[0].user_id}&limit=1`);
+  return u && u[0] ? u[0] : null;
 }
 
-async function getOrCreateUsage(userId) {
-  const res = await sbSelect('usage', `user_id=eq.${userId}&limit=1`);
-  if (res && res[0]) {
-    const u = res[0];
-    const currentMonth = await getCurrentMonthStart();
-    if (u.month_start !== currentMonth) {
-      const updated = await sbUpdate('usage', `user_id=eq.${userId}`, {
-        month_start: currentMonth,
-        requests_ultra: 0,
-        images_generated: 0
+async function getOrCreateUsage(uid) {
+  const r = await sbSelect('usage', `user_id=eq.${uid}&limit=1`);
+  if (r && r[0]) {
+    const cm = await getCurrentMonthStart();
+    if (r[0].month_start !== cm) {
+      const upd = await sbUpdate('usage', `user_id=eq.${uid}`, {
+        month_start: cm, requests_ultra: 0, images_generated: 0
       });
-      return updated[0];
+      return upd[0];
     }
-    return u;
+    return r[0];
   }
-  const created = await sbInsert('usage', {
-    user_id: userId,
-    month_start: await getCurrentMonthStart(),
-    requests_ultra: 0,
-    images_generated: 0
+  const c = await sbInsert('usage', {
+    user_id: uid, month_start: await getCurrentMonthStart(),
+    requests_ultra: 0, images_generated: 0
   });
-  return created[0];
+  return c[0];
 }
 
-function checkLimit(tariff, usage, kind) {
-  const limits = TARIFF_LIMITS[tariff] || TARIFF_LIMITS.base;
-  if (kind === 'ultra') {
-    return usage.requests_ultra < limits.ultra;
-  }
-  if (kind === 'image') {
-    return usage.images_generated < limits.images;
-  }
+function checkLimit(t, u, k) {
+  const l = TARIFF_LIMITS[t] || TARIFF_LIMITS.base;
+  if (k === 'ultra') return u.requests_ultra < l.ultra;
+  if (k === 'image') return u.images_generated < l.images;
   return true;
 }
 
-async function incrementUsage(userId, kind) {
-  const usage = await getOrCreateUsage(userId);
-  if (kind === 'ultra') {
-    await sbUpdate('usage', `user_id=eq.${userId}`, {
-      requests_ultra: usage.requests_ultra + 1
-    });
-  }
-  if (kind === 'image') {
-    await sbUpdate('usage', `user_id=eq.${userId}`, {
-      images_generated: usage.images_generated + 1
-    });
-  }
+async function incrementUsage(uid, k) {
+  const u = await getOrCreateUsage(uid);
+  if (k === 'ultra') await sbUpdate('usage', `user_id=eq.${uid}`, { requests_ultra: u.requests_ultra + 1 });
+  if (k === 'image') await sbUpdate('usage', `user_id=eq.${uid}`, { images_generated: u.images_generated + 1 });
 }
 
 // ============================================================
@@ -243,7 +186,7 @@ async function getAccessToken() {
   const params = new URLSearchParams();
   params.append('scope', GIGACHAT_SCOPE);
 
-  const response = await fetch(OAUTH_URL, {
+  const r = await fetch(OAUTH_URL, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${GIGACHAT_CREDENTIALS}`,
@@ -253,14 +196,10 @@ async function getAccessToken() {
     body: params.toString()
   });
 
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`OAuth failed: ${response.status} — ${text.slice(0, 300)}`);
-  }
-
-  const data = await response.json();
-  cachedToken = data.access_token;
-  tokenExpiresAt = data.exp || (now + 30 * 60 * 1000);
+  if (!r.ok) throw new Error(`OAuth: ${r.status}`);
+  const d = await r.json();
+  cachedToken = d.access_token;
+  tokenExpiresAt = d.exp || (now + 30 * 60 * 1000);
   return cachedToken;
 }
 
@@ -270,141 +209,80 @@ async function getAccessToken() {
 
 async function handleRegister(body) {
   const { username, password, displayName } = body;
-
-  if (!username || typeof username !== 'string' || username.length < 3) {
-    return { status: 400, data: { error: 'Логин должен быть минимум 3 символа' } };
-  }
-  if (!/^[a-zA-Z0-9_]+$/.test(username)) {
-    return { status: 400, data: { error: 'Только латиница, цифры и _' } };
-  }
-  if (!password || typeof password !== 'string' || password.length < 4) {
-    return { status: 400, data: { error: 'Пароль минимум 4 символа' } };
-  }
-
-  const existing = await getUserByUsername(username);
-  if (existing) {
-    return { status: 409, data: { error: 'Такой логин уже занят' } };
-  }
+  if (!username || username.length < 3) return { status: 400, data: { error: 'Логин минимум 3 символа' } };
+  if (!/^[a-zA-Z0-9_]+$/.test(username)) return { status: 400, data: { error: 'Только латиница, цифры и _' } };
+  if (!password || password.length < 4) return { status: 400, data: { error: 'Пароль минимум 4 символа' } };
+  if (await getUserByUsername(username)) return { status: 409, data: { error: 'Такой логин уже занят' } };
 
   const salt = generateSalt();
   const hash = hashPassword(password, salt);
-
-  const created = await sbInsert('users', {
-    username,
-    display_name: displayName || username,
-    password_hash: hash,
-    password_salt: salt,
-    tariff: 'base',
-    show_name_to_ai: false,
-    is_admin: false
+  const c = await sbInsert('users', {
+    username, display_name: displayName || username,
+    password_hash: hash, password_salt: salt,
+    tariff: 'base', show_name_to_ai: false, is_admin: false
   });
-
-  const user = created[0];
+  const user = c[0];
   await getOrCreateUsage(user.id);
 
-  // Сразу создаём сессию
   const token = generateToken();
-  const expires = new Date(Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000);
-  await sbInsert('sessions', {
-    token,
-    user_id: user.id,
-    expires_at: expires.toISOString()
-  });
+  const exp = new Date(Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000);
+  await sbInsert('sessions', { token, user_id: user.id, expires_at: exp.toISOString() });
 
-  return {
-    status: 200,
-    data: {
-      token,
-      user: {
-        username: user.username,
-        displayName: user.display_name,
-        tariff: user.tariff,
-        showNameToAi: user.show_name_to_ai
-      }
-    }
-  };
+  return { status: 200, data: { token, user: {
+    username: user.username, displayName: user.display_name,
+    tariff: user.tariff, showNameToAi: user.show_name_to_ai
+  } } };
 }
 
 async function handleLogin(body) {
   const { username, password } = body;
-
-  if (!username || !password) {
-    return { status: 400, data: { error: 'Введите логин и пароль' } };
-  }
-
+  if (!username || !password) return { status: 400, data: { error: 'Введите логин и пароль' } };
   const user = await getUserByUsername(username);
-  if (!user) {
+  if (!user) return { status: 401, data: { error: 'Неверный логин или пароль' } };
+  if (hashPassword(password, user.password_salt) !== user.password_hash) {
     return { status: 401, data: { error: 'Неверный логин или пароль' } };
   }
-
-  const hash = hashPassword(password, user.password_salt);
-  if (hash !== user.password_hash) {
-    return { status: 401, data: { error: 'Неверный логин или пароль' } };
-  }
-
   const token = generateToken();
-  const expires = new Date(Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000);
-  await sbInsert('sessions', {
-    token,
-    user_id: user.id,
-    expires_at: expires.toISOString()
-  });
-
-  return {
-    status: 200,
-    data: {
-      token,
-      user: {
-        username: user.username,
-        displayName: user.display_name,
-        tariff: user.tariff,
-        showNameToAi: user.show_name_to_ai
-      }
-    }
-  };
+  const exp = new Date(Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000);
+  await sbInsert('sessions', { token, user_id: user.id, expires_at: exp.toISOString() });
+  return { status: 200, data: { token, user: {
+    username: user.username, displayName: user.display_name,
+    tariff: user.tariff, showNameToAi: user.show_name_to_ai
+  } } };
 }
 
 async function handleLogout(req) {
-  const token = req.headers['x-auth-token'];
-  if (token) {
-    await sbDelete('sessions', `token=eq.${encodeURIComponent(token)}`);
-  }
+  const t = req.headers['x-auth-token'];
+  if (t) await sbDelete('sessions', `token=eq.${encodeURIComponent(t)}`);
   return { status: 200, data: { ok: true } };
 }
 
 async function handleMe(req) {
-  const token = req.headers['x-auth-token'];
-  if (!token) return { status: 401, data: { error: 'Нет токена' } };
-
-  const user = await getUserByToken(token);
+  const t = req.headers['x-auth-token'];
+  if (!t) return { status: 401, data: { error: 'Нет токена' } };
+  const user = await getUserByToken(t);
   if (!user) return { status: 401, data: { error: 'Сессия истекла' } };
-
   const usage = await getOrCreateUsage(user.id);
   const limits = TARIFF_LIMITS[user.tariff] || TARIFF_LIMITS.base;
-
-  return {
-    status: 200,
-    data: {
-      username: user.username,
-      displayName: user.display_name,
-      tariff: user.tariff,
-      showNameToAi: user.show_name_to_ai,
-      usage: {
-        ultra: usage.requests_ultra,
-        ultraLimit: limits.ultra === Infinity ? null : limits.ultra,
-        images: usage.images_generated,
-        imageLimit: limits.images === Infinity ? null : limits.images,
-        monthStart: usage.month_start
-      }
+  return { status: 200, data: {
+    username: user.username,
+    displayName: user.display_name,
+    tariff: user.tariff,
+    showNameToAi: user.show_name_to_ai,
+    usage: {
+      ultra: usage.requests_ultra,
+      ultraLimit: limits.ultra === Infinity ? null : limits.ultra,
+      images: usage.images_generated,
+      imageLimit: limits.images === Infinity ? null : limits.images,
+      monthStart: usage.month_start
     }
-  };
+  } };
 }
 
 async function handleUpdateMe(req, body) {
-  const token = req.headers['x-auth-token'];
-  if (!token) return { status: 401, data: { error: 'Нет токена' } };
-
-  const user = await getUserByToken(token);
+  const t = req.headers['x-auth-token'];
+  if (!t) return { status: 401, data: { error: 'Нет токена' } };
+  const user = await getUserByToken(t);
   if (!user) return { status: 401, data: { error: 'Сессия истекла' } };
 
   const updates = {};
@@ -414,183 +292,199 @@ async function handleUpdateMe(req, body) {
   if (typeof body.showNameToAi === 'boolean') {
     updates.show_name_to_ai = body.showNameToAi;
   }
+  if (Object.keys(updates).length === 0) return { status: 400, data: { error: 'Нечего обновлять' } };
 
-  if (Object.keys(updates).length === 0) {
-    return { status: 400, data: { error: 'Нечего обновлять' } };
-  }
-
-  const updated = await sbUpdate('users', `id=eq.${user.id}`, updates);
-  const u = updated[0];
-
-  return {
-    status: 200,
-    data: {
-      username: u.username,
-      displayName: u.display_name,
-      tariff: u.tariff,
-      showNameToAi: u.show_name_to_ai
-    }
-  };
+  const upd = await sbUpdate('users', `id=eq.${user.id}`, updates);
+  const u = upd[0];
+  return { status: 200, data: {
+    username: u.username, displayName: u.display_name,
+    tariff: u.tariff, showNameToAi: u.show_name_to_ai
+  } };
 }
 
 async function handleUpload(req, body) {
-  const token = req.headers['x-auth-token'];
-  if (!token) return { status: 401, data: { error: 'Нет токена' } };
-  const user = await getUserByToken(token);
+  const t = req.headers['x-auth-token'];
+  if (!t) return { status: 401, data: { error: 'Нет токена' } };
+  const user = await getUserByToken(t);
   if (!user) return { status: 401, data: { error: 'Сессия истекла' } };
 
   const { filename, mimetype, dataBase64 } = body;
-  if (!filename || !dataBase64) {
-    return { status: 400, data: { error: 'Не указано имя файла или данные' } };
-  }
+  if (!filename || !dataBase64) return { status: 400, data: { error: 'Нет файла' } };
 
-  let fileBuffer;
-  try { fileBuffer = Buffer.from(dataBase64, 'base64'); }
-  catch (e) { return { status: 400, data: { error: 'Ошибка декодирования файла' } }; }
+  let buf;
+  try { buf = Buffer.from(dataBase64, 'base64'); }
+  catch (e) { return { status: 400, data: { error: 'Ошибка декодирования' } }; }
 
-  if (fileBuffer.length > MAX_FILE_SIZE) {
-    return { status: 413, data: { error: 'Файл больше 25 МБ' } };
-  }
+  if (buf.length > MAX_FILE_SIZE) return { status: 413, data: { error: 'Файл больше 25 МБ' } };
 
-  let accessToken;
-  try { accessToken = await getAccessToken(); }
-  catch (e) { return { status: 502, data: { error: 'Auth failed: ' + e.message } }; }
+  let at;
+  try { at = await getAccessToken(); }
+  catch (e) { return { status: 502, data: { error: 'Auth' } }; }
 
   try {
-    const formData = new FormData();
-    const blob = new Blob([fileBuffer], { type: mimetype || 'application/octet-stream' });
-    formData.append('file', blob, filename);
-    formData.append('purpose', 'general');
+    const fd = new FormData();
+    const blob = new Blob([buf], { type: mimetype || 'application/octet-stream' });
+    fd.append('file', blob, filename);
+    fd.append('purpose', 'general');
 
-    const response = await fetch(FILES_URL, {
+    const r = await fetch(FILES_URL, {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${accessToken}` },
-      body: formData
+      headers: { 'Authorization': `Bearer ${at}` },
+      body: fd
     });
+    const txt = await r.text();
+    if (!r.ok) return { status: 502, data: { error: 'Upload', details: txt.slice(0, 300) } };
 
-    const rawText = await response.text();
-    if (!response.ok) {
-      return { status: 502, data: { error: 'GigaChat upload error', details: rawText.slice(0, 300) } };
-    }
-
-    const data = JSON.parse(rawText);
-    const fileId = data.id || data.file_id;
-    if (!fileId) return { status: 502, data: { error: 'Не вернулся id файла' } };
-
-    return { status: 200, data: { file_id: fileId, filename } };
+    const d = JSON.parse(txt);
+    const fid = d.id || d.file_id;
+    if (!fid) return { status: 502, data: { error: 'Нет id' } };
+    return { status: 200, data: { file_id: fid, filename } };
   } catch (e) {
-    return { status: 502, data: { error: 'Upload failed: ' + e.message } };
+    return { status: 502, data: { error: e.message } };
   }
 }
 
 async function handleChat(req, body) {
-  const token = req.headers['x-auth-token'];
-  if (!token) return { status: 401, data: { error: 'Нет токена' } };
-
-  const user = await getUserByToken(token);
+  const t = req.headers['x-auth-token'];
+  if (!t) return { status: 401, data: { error: 'Нет токена' } };
+  const user = await getUserByToken(t);
   if (!user) return { status: 401, data: { error: 'Сессия истекла' } };
 
   const { botId, message, history, modelType, blacklist, attachmentIds } = body;
+  if (!botId || !SYSTEM_PROMPTS[botId]) return { status: 400, data: { error: 'Invalid botId' } };
 
-  if (!botId || !SYSTEM_PROMPTS[botId]) {
-    return { status: 400, data: { error: 'Invalid botId' } };
-  }
+  const hasAtt = Array.isArray(attachmentIds) && attachmentIds.length > 0;
+  if ((!message || !message.trim()) && !hasAtt) return { status: 400, data: { error: 'Empty message' } };
 
-  const hasAttachments = Array.isArray(attachmentIds) && attachmentIds.length > 0;
-  if ((!message || !message.trim()) && !hasAttachments) {
-    return { status: 400, data: { error: 'Empty message' } };
-  }
-
-  // Проверка лимитов
   const usage = await getOrCreateUsage(user.id);
   const isUltra = modelType === 'ultra';
-
   if (isUltra && !checkLimit(user.tariff, usage, 'ultra')) {
-    return {
-      status: 429,
-      data: {
-        error: 'Лимит Ultra на этот месяц исчерпан. Обнови тариф или подожди до 1 числа.',
-        code: 'LIMIT_ULTRA'
-      }
-    };
+    return { status: 429, data: { error: 'Лимит Ultra исчерпан', code: 'LIMIT_ULTRA' } };
   }
 
-  // Собираем messages
   const messages = [];
-  let systemPrompt = SYSTEM_PROMPTS[botId];
-
-  // Имя пользователя для ИИ — только если включена галочка
+  let sp = SYSTEM_PROMPTS[botId];
   if (user.show_name_to_ai && user.display_name) {
-    systemPrompt += `\n\nПользователь, с которым ты сейчас общаешься, зовут ${user.display_name}. Можешь обращаться к нему по имени.`;
+    sp += `\n\nПользователь, с которым ты сейчас общаешься, зовут ${user.display_name}.`;
   }
-
-  systemPrompt += buildBlacklistPrompt(blacklist);
-  messages.push({ role: 'system', content: systemPrompt });
+  sp += buildBlacklistPrompt(blacklist);
+  messages.push({ role: 'system', content: sp });
 
   if (Array.isArray(history) && history.length > 0) {
-    const trimmed = history.slice(-MAX_HISTORY);
-    for (const msg of trimmed) {
-      if ((msg.role === 'user' || msg.role === 'assistant') && typeof msg.content === 'string') {
-        messages.push({ role: msg.role, content: msg.content });
+    const tr = history.slice(-MAX_HISTORY);
+    for (const m of tr) {
+      if ((m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string') {
+        messages.push({ role: m.role, content: m.content });
       }
     }
   }
 
-  const userText = (message && message.trim()) ? message.trim() : 'Опиши, что на прикреплённом файле.';
-  const userMessage = { role: 'user', content: userText };
-  if (hasAttachments) {
-    userMessage.attachments = attachmentIds;
-  }
-  messages.push(userMessage);
+  const uText = (message && message.trim()) ? message.trim() : 'Опиши, что на прикреплённом файле.';
+  const um = { role: 'user', content: uText };
+  if (hasAtt) um.attachments = attachmentIds;
+  messages.push(um);
 
-  let accessToken;
-  try { accessToken = await getAccessToken(); }
-  catch (e) { return { status: 502, data: { error: 'Auth failed: ' + e.message } }; }
+  let at;
+  try { at = await getAccessToken(); }
+  catch (e) { return { status: 502, data: { error: 'Auth' } }; }
 
   const model = isUltra ? MODEL_ULTRA : MODEL_BASE;
-  const gigachatBody = { model, messages, max_tokens: 4000 };
-  if (hasAttachments) gigachatBody.function_call = 'auto';
+  const gb = { model, messages, max_tokens: 4000 };
+  if (hasAtt) gb.function_call = 'auto';
 
-  let gcResponse;
+  let r;
   try {
-    gcResponse = await fetch(API_URL, {
+    r = await fetch(API_URL, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-      },
-      body: JSON.stringify(gigachatBody)
+      headers: { 'Authorization': `Bearer ${at}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(gb)
     });
   } catch (e) {
-    return { status: 502, data: { error: 'GigaChat unreachable: ' + e.message } };
+    return { status: 502, data: { error: 'Unreachable' } };
   }
 
-  const rawText = await gcResponse.text();
+  const rt = await r.text();
+  if (!r.ok) return { status: 502, data: { error: 'GigaChat', status: r.status, details: rt.slice(0, 500) } };
 
-  if (!gcResponse.ok) {
-    return {
-      status: 502,
-      data: { error: 'GigaChat error', status: gcResponse.status, details: rawText.slice(0, 500) }
-    };
+  let d;
+  try { d = JSON.parse(rt); }
+  catch (e) { return { status: 502, data: { error: 'Parse' } }; }
+
+  const reply = d?.choices?.[0]?.message?.content;
+  if (!reply) return { status: 502, data: { error: 'Empty' } };
+
+  if (isUltra) await incrementUsage(user.id, 'ultra');
+  return { status: 200, data: { reply, model: d.model || model, usage: d.usage || null } };
+}
+
+// ============================================================
+// АДМИН (без ключа)
+// ============================================================
+
+async function handleAdminUsers() {
+  const users = await sbSelect('users', 'order=id.asc');
+  const usage = await sbSelect('usage', '');
+  const usageMap = {};
+  (usage || []).forEach(u => { usageMap[u.user_id] = u; });
+
+  const result = (users || []).map(u => ({
+    id: u.id,
+    username: u.username,
+    displayName: u.display_name,
+    tariff: u.tariff,
+    showNameToAi: u.show_name_to_ai,
+    isAdmin: u.is_admin,
+    createdAt: u.created_at,
+    usage: usageMap[u.id] ? {
+      monthStart: usageMap[u.id].month_start,
+      requestsUltra: usageMap[u.id].requests_ultra,
+      imagesGenerated: usageMap[u.id].images_generated
+    } : null
+  }));
+
+  return { status: 200, data: { users: result } };
+}
+
+async function handleAdminUserUpdate(body) {
+  const { userId, tariff, resetUsage, showNameToAi, isAdmin } = body;
+  if (!userId) return { status: 400, data: { error: 'Нет userId' } };
+
+  const updates = {};
+  if (tariff && ['base', 'pro', 'ultimate'].includes(tariff)) updates.tariff = tariff;
+  if (typeof showNameToAi === 'boolean') updates.show_name_to_ai = showNameToAi;
+  if (typeof isAdmin === 'boolean') updates.is_admin = isAdmin;
+
+  if (Object.keys(updates).length > 0) {
+    await sbUpdate('users', `id=eq.${userId}`, updates);
   }
 
-  let gcData;
-  try { gcData = JSON.parse(rawText); }
-  catch (e) { return { status: 502, data: { error: 'Invalid response' } }; }
-
-  const reply = gcData?.choices?.[0]?.message?.content;
-  if (!reply) return { status: 502, data: { error: 'Empty reply', raw: gcData } };
-
-  // Учёт использования
-  if (isUltra) {
-    await incrementUsage(user.id, 'ultra');
+  if (resetUsage) {
+    const cm = await getCurrentMonthStart();
+    const ex = await sbSelect('usage', `user_id=eq.${userId}&limit=1`);
+    if (ex && ex[0]) {
+      await sbUpdate('usage', `user_id=eq.${userId}`, {
+        month_start: cm, requests_ultra: 0, images_generated: 0
+      });
+    } else {
+      await sbInsert('usage', {
+        user_id: userId, month_start: cm,
+        requests_ultra: 0, images_generated: 0
+      });
+    }
   }
 
-  return {
-    status: 200,
-    data: { reply, model: gcData.model || model, usage: gcData.usage || null }
-  };
+  return { status: 200, data: { ok: true } };
+}
+
+async function handleAdminUserDelete(body) {
+  const { userId } = body;
+  if (!userId) return { status: 400, data: { error: 'Нет userId' } };
+
+  await sbDelete('sessions', `user_id=eq.${userId}`);
+  await sbDelete('usage', `user_id=eq.${userId}`);
+  await sbDelete('users', `id=eq.${userId}`);
+
+  return { status: 200, data: { ok: true } };
 }
 
 // ============================================================
@@ -609,14 +503,14 @@ function sendJson(res, status, data) {
 
 function readBody(req, limit = 50 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
-    let rawBody = '';
+    let raw = '';
     let total = 0;
-    req.on('data', chunk => {
-      total += chunk.length;
-      if (total > limit) { reject(new Error('Payload too large')); req.destroy(); return; }
-      rawBody += chunk;
+    req.on('data', c => {
+      total += c.length;
+      if (total > limit) { reject(new Error('Too large')); req.destroy(); return; }
+      raw += c;
     });
-    req.on('end', () => resolve(rawBody));
+    req.on('end', () => resolve(raw));
     req.on('error', reject);
   });
 }
@@ -636,37 +530,38 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/' || url.pathname === '/health') {
-    sendJson(res, 200, { status: 'ok', service: 'fableai-proxy', auth: true, tariffs: true });
+    sendJson(res, 200, { status: 'ok', service: 'fableai-proxy', auth: true, tariffs: true, admin: true });
     return;
   }
 
   try {
     if (req.method === 'POST') {
-      let rawBody;
-      try { rawBody = await readBody(req); }
+      let raw;
+      try { raw = await readBody(req); }
       catch (e) { sendJson(res, 413, { error: e.message }); return; }
 
       let body = {};
-      if (rawBody) {
-        try { body = JSON.parse(rawBody); }
+      if (raw) {
+        try { body = JSON.parse(raw); }
         catch (e) { sendJson(res, 400, { error: 'Invalid JSON' }); return; }
       }
 
       let result;
-
       switch (url.pathname) {
-        case '/register': result = await handleRegister(body); break;
-        case '/login':    result = await handleLogin(body); break;
-        case '/logout':   result = await handleLogout(req); break;
-        case '/me':       result = await handleMe(req); break;
-        case '/me/update':result = await handleUpdateMe(req, body); break;
-        case '/upload':   result = await handleUpload(req, body); break;
-        case '/chat':     result = await handleChat(req, body); break;
+        case '/register':            result = await handleRegister(body); break;
+        case '/login':               result = await handleLogin(body); break;
+        case '/logout':              result = await handleLogout(req); break;
+        case '/me':                  result = await handleMe(req); break;
+        case '/me/update':           result = await handleUpdateMe(req, body); break;
+        case '/upload':              result = await handleUpload(req, body); break;
+        case '/chat':                result = await handleChat(req, body); break;
+        case '/admin/users':         result = await handleAdminUsers(); break;
+        case '/admin/user/update':   result = await handleAdminUserUpdate(body); break;
+        case '/admin/user/delete':   result = await handleAdminUserDelete(body); break;
         default:
           sendJson(res, 404, { error: 'Not found' });
           return;
       }
-
       sendJson(res, result.status, result.data);
       return;
     }
@@ -679,8 +574,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[OK] FableAI прокси запущен на порту ${PORT}`);
+  console.log(`[OK] FableAI запущен на порту ${PORT}`);
   console.log(`[OK] Base: ${MODEL_BASE}`);
   console.log(`[OK] Ultra: ${MODEL_ULTRA}`);
-  console.log(`[OK] Supabase: ${SUPABASE_URL}`);
+  console.log(`[OK] Админ: /admin/users, /admin/user/update, /admin/user/delete`);
 });
