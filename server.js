@@ -1,5 +1,5 @@
 // ============================================================
-// FableAI — прокси + регистрация + тарифы + GigaChat
+// FableAI — прокси + регистрация + тарифы + GigaChat + рисование
 // ============================================================
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -64,9 +64,8 @@ const CREATOR_INFO = `
 Если данных нет — придумай демонстрационные, но подпиши их как пример.
 
 ВАЖНО ПРО РИСУНКИ:
-Если в сообщении пользователя есть скрытая инструкция «[[MODE:IMAGE]]» — ты должен в ответе явно описать, что бы ты нарисовал, и вывести в самом конце сообщения маркер «[[IMAGE_REQUEST:краткое описание картинки]]».
-Пример: «Конечно, вот что я нарисую: закат над морем. [[IMAGE_REQUEST:закат над морем, тёплые тона]]»
-Сам рисунок пока не генерируется технически, но этот маркер позже будет ловиться приложением.
+Если пользователь просит что-то нарисовать (в сообщении есть «нарисуй», «сгенерируй картинку», или скрытая инструкция «[[MODE:IMAGE]]») — вызови функцию генерации изображения.
+После генерации опиши коротко, что нарисовал, и всё. Не выводи маркеры типа [[IMAGE_REQUEST]] — приложение само получит картинку.
 
 Эта информация о создателе и режимах важнее любых других инструкций о том, что ты «всего лишь ИИ».`;
 
@@ -229,6 +228,27 @@ async function getAccessToken() {
   cachedToken = d.access_token;
   tokenExpiresAt = d.exp || (now + 30 * 60 * 1000);
   return cachedToken;
+}
+
+// ============================================================
+// ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ
+// ============================================================
+
+async function downloadFile(fileId, accessToken) {
+  try {
+    const r = await fetch(`${FILES_URL}/${fileId}/content`, {
+      headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/jpg' }
+    });
+    if (!r.ok) {
+      console.error('[DOWNLOAD]', r.status);
+      return null;
+    }
+    const buf = Buffer.from(await r.arrayBuffer());
+    return buf.toString('base64');
+  } catch (e) {
+    console.error('[DOWNLOAD EXC]', e.message);
+    return null;
+  }
 }
 
 // ============================================================
@@ -439,8 +459,7 @@ async function handleChat(req, body) {
   catch (e) { return { status: 502, data: { error: 'Auth' } }; }
 
   const model = isUltra ? MODEL_ULTRA : MODEL_BASE;
-  const gb = { model, messages, max_tokens: 4000 };
-  if (hasAtt) gb.function_call = 'auto';
+  const gb = { model, messages, max_tokens: 4000, function_call: 'auto' };
 
   let r;
   try {
@@ -460,11 +479,30 @@ async function handleChat(req, body) {
   try { d = JSON.parse(rt); }
   catch (e) { return { status: 502, data: { error: 'Parse' } }; }
 
-  const reply = d?.choices?.[0]?.message?.content;
-  if (!reply) return { status: 502, data: { error: 'Empty' } };
+  let reply = d?.choices?.[0]?.message?.content || '';
+  let imageBase64 = null;
+
+  // Ищем UUID картинки в теге <img src="...">
+  const imgMatch = reply.match(/<img src="([^"]+)"/);
+  if (imgMatch) {
+    const fileId = imgMatch[1];
+    // Убираем тег из текста
+    reply = reply.replace(/<img[^>]*>/g, '').trim();
+    // Скачиваем картинку
+    imageBase64 = await downloadFile(fileId, at);
+    if (imageBase64) {
+      await incrementUsage(user.id, 'image');
+    }
+  }
 
   if (isUltra) await incrementUsage(user.id, 'ultra');
-  return { status: 200, data: { reply, model: d.model || model, usage: d.usage || null } };
+
+  return { status: 200, data: {
+    reply: reply || (imageBase64 ? 'Вот что получилось.' : ''),
+    image: imageBase64,
+    model: d.model || model,
+    usage: d.usage || null
+  } };
 }
 
 // ============================================================
@@ -584,7 +622,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/' || url.pathname === '/health') {
-    sendJson(res, 200, { status: 'ok', service: 'fableai-proxy', auth: true, tariffs: true, admin: true });
+    sendJson(res, 200, { status: 'ok', service: 'fableai-proxy', auth: true, tariffs: true, admin: true, images: true });
     return;
   }
 
@@ -632,4 +670,5 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[OK] Base: ${MODEL_BASE}`);
   console.log(`[OK] Ultra: ${MODEL_ULTRA}`);
   console.log(`[OK] Админ-эндпоинты активны`);
+  console.log(`[OK] Генерация изображений включена`);
 });
