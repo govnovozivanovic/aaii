@@ -651,11 +651,12 @@ async function handleCreateApp(req, body) {
   const user = await getUserByToken(t);
   if (!(await isDeveloper(user))) return { status: 403, data: { error: 'Доступ запрещён' } };
 
-  const { name, description, icon, date, released } = body;
+  const { name, description, icon, date, released, updateInfo, updateDate } = body;
   if (!name || !description) return { status: 400, data: { error: 'Нужны название и описание' } };
 
   const newApp = await sbInsert('dev_apps', {
-    name, description, icon: icon || null, date: date || '', released: released !== false
+    name, description, icon: icon || null, date: date || '', released: released !== false,
+    update_info: updateInfo || null, update_date: updateDate || null
   });
   return { status: 200, data: { app: newApp[0] } };
 }
@@ -666,7 +667,7 @@ async function handleUpdateApp(req, body) {
   const user = await getUserByToken(t);
   if (!(await isDeveloper(user))) return { status: 403, data: { error: 'Доступ запрещён' } };
 
-  const { id, name, description, icon, date, released } = body;
+  const { id, name, description, icon, date, released, updateInfo, updateDate } = body;
   if (!id) return { status: 400, data: { error: 'Нет ID приложения' } };
 
   const updates = {};
@@ -675,6 +676,8 @@ async function handleUpdateApp(req, body) {
   if (icon !== undefined) updates.icon = icon;
   if (date !== undefined) updates.date = date;
   if (released !== undefined) updates.released = released;
+  if (updateInfo !== undefined) updates.update_info = updateInfo;
+  if (updateDate !== undefined) updates.update_date = updateDate;
 
   const updated = await sbUpdate('dev_apps', `id=eq.${id}`, updates);
   return { status: 200, data: { app: updated[0] } };
@@ -810,7 +813,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/' || url.pathname === '/health') {
-    sendJson(res, 200, { status: 'ok', service: 'fableai-proxy', auth: true, tariffs: true, admin: true, images: true, search: true, explain: true, customChars: true, devApps: true });
+    sendJson(res, 200, { status: 'ok', service: 'fableai-proxy', auth: true, tariffs: true, admin: true, images: true, search: true, explain: true, customChars: true, devApps: true, devAppUpdates: true });
     return;
   }
 
@@ -867,4 +870,5 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[OK] Режим "Объясни" включён`);
   console.log(`[OK] Кастомные персонажи включены`);
   console.log(`[OK] Fable Development API включён`);
+  console.log(`[OK] Инфо об обновлениях приложений включено`);
 });
