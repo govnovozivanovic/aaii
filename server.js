@@ -1,5 +1,5 @@
 // ============================================================
-// FableAI — прокси + регистрация + тарифы + GigaChat + рисование + поиск + объяснение + кастомные персонажи
+// FableAI — прокси + регистрация + тарифы + GigaChat + рисование + поиск + объяснение + кастомные персонажи + Fable Development
 // ============================================================
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -630,6 +630,70 @@ async function handleChat(req, body) {
 }
 
 // ============================================================
+// FABLE DEVELOPMENT (Приложения)
+// ============================================================
+
+async function isDeveloper(user) {
+  if (!user) return false;
+  // Проверяем логин и префикс (используем имя колонки из твоей базы)
+  const uName = user['имя_пользователя'] || user.username || '';
+  return uName === 'Даниэль' || uName === 'Daniel_девелопер' || user.prefix === 'Разработчик';
+}
+
+async function handleGetApps() {
+  const apps = await sbSelect('dev_apps', 'order=created_at.desc');
+  return { status: 200, data: { apps: apps || [] } };
+}
+
+async function handleCreateApp(req, body) {
+  const t = req.headers['x-auth-token'];
+  if (!t) return { status: 401, data: { error: 'Нет токена' } };
+  const user = await getUserByToken(t);
+  if (!(await isDeveloper(user))) return { status: 403, data: { error: 'Доступ запрещён' } };
+
+  const { name, description, icon, date, released } = body;
+  if (!name || !description) return { status: 400, data: { error: 'Нужны название и описание' } };
+
+  const newApp = await sbInsert('dev_apps', {
+    name, description, icon: icon || null, date: date || '', released: released !== false
+  });
+  return { status: 200, data: { app: newApp[0] } };
+}
+
+async function handleUpdateApp(req, body) {
+  const t = req.headers['x-auth-token'];
+  if (!t) return { status: 401, data: { error: 'Нет токена' } };
+  const user = await getUserByToken(t);
+  if (!(await isDeveloper(user))) return { status: 403, data: { error: 'Доступ запрещён' } };
+
+  const { id, name, description, icon, date, released } = body;
+  if (!id) return { status: 400, data: { error: 'Нет ID приложения' } };
+
+  const updates = {};
+  if (name) updates.name = name;
+  if (description) updates.description = description;
+  if (icon !== undefined) updates.icon = icon;
+  if (date !== undefined) updates.date = date;
+  if (released !== undefined) updates.released = released;
+
+  const updated = await sbUpdate('dev_apps', `id=eq.${id}`, updates);
+  return { status: 200, data: { app: updated[0] } };
+}
+
+async function handleDeleteApp(req, body) {
+  const t = req.headers['x-auth-token'];
+  if (!t) return { status: 401, data: { error: 'Нет токена' } };
+  const user = await getUserByToken(t);
+  if (!(await isDeveloper(user))) return { status: 403, data: { error: 'Доступ запрещён' } };
+
+  const { id } = body;
+  if (!id) return { status: 400, data: { error: 'Нет ID приложения' } };
+
+  await sbDelete('dev_apps', `id=eq.${id}`);
+  return { status: 200, data: { ok: true } };
+}
+
+// ============================================================
 // АДМИН
 // ============================================================
 
@@ -746,7 +810,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/' || url.pathname === '/health') {
-    sendJson(res, 200, { status: 'ok', service: 'fableai-proxy', auth: true, tariffs: true, admin: true, images: true, search: true, explain: true, customChars: true });
+    sendJson(res, 200, { status: 'ok', service: 'fableai-proxy', auth: true, tariffs: true, admin: true, images: true, search: true, explain: true, customChars: true, devApps: true });
     return;
   }
 
@@ -774,6 +838,10 @@ const server = http.createServer(async (req, res) => {
         case '/admin/users':         result = await handleAdminUsers(); break;
         case '/admin/user/update':   result = await handleAdminUserUpdate(body); break;
         case '/admin/user/delete':   result = await handleAdminUserDelete(body); break;
+        case '/dev/apps':            result = await handleGetApps(); break;
+        case '/dev/apps/create':     result = await handleCreateApp(req, body); break;
+        case '/dev/apps/update':     result = await handleUpdateApp(req, body); break;
+        case '/dev/apps/delete':     result = await handleDeleteApp(req, body); break;
         default:
           sendJson(res, 404, { error: 'Not found' });
           return;
@@ -798,4 +866,5 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[OK] Интернет-поиск включён`);
   console.log(`[OK] Режим "Объясни" включён`);
   console.log(`[OK] Кастомные персонажи включены`);
+  console.log(`[OK] Fable Development API включён`);
 });
