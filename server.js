@@ -635,9 +635,13 @@ async function handleChat(req, body) {
 
 async function isDeveloper(user) {
   if (!user) return false;
-  // Проверяем логин и префикс (используем имя колонки из твоей базы)
-  const uName = user['имя_пользователя'] || user.username || '';
-  return uName === 'Даниэль' || uName === 'Daniel_девелопер' || user.prefix === 'Разработчик';
+  
+  // Берем имя из любого возможного поля и приводим к нижнему регистру для надежности
+  const rawName = user['имя_пользователя'] || user.username || user.display_name || '';
+  const uName = String(rawName).toLowerCase().trim();
+  
+  // Проверяем все варианты (Daniel, даниэль, daniel_девелопер) или префикс
+  return uName === 'daniel' || uName === 'даниэль' || uName === 'daniel_девелопер' || user.prefix === 'Разработчик';
 }
 
 async function handleGetApps() {
