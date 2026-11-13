@@ -497,9 +497,8 @@ async function handleChat(req, body) {
   const { botId, message, history, modelType, blacklist, attachmentIds, customPrompt, customName } = body;
 
   // Проверяем, что либо есть кастомный промпт, либо стандартный бот
-  if (!customPrompt && (!botId || !SYSTEM_PROMPTS[botId])) {
-    return { status: 400, data: { error: 'Invalid botId' } };
-  }
+  if (!botId && !customPrompt) return { status: 400, data: { error: 'Invalid botId' } };
+  if (!customPrompt && !SYSTEM_PROMPTS[botId]) return { status: 400, data: { error: 'Invalid botId' } };
 
   const hasAtt = Array.isArray(attachmentIds) && attachmentIds.length > 0;
   if ((!message || !message.trim()) && !hasAtt) return { status: 400, data: { error: 'Empty message' } };
