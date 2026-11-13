@@ -1,5 +1,5 @@
 // ============================================================
-// FableAI — прокси + регистрация + тарифы + GigaChat + рисование
+// FableAI — прокси + регистрация + тарифы + GigaChat + рисование + поиск
 // ============================================================
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -62,7 +62,7 @@ const CREATOR_INFO = `
 - Слева сверху — кнопка меню (три полоски). Там: сохранённые чаты, смена собеседника (Юмэ/Веритус), аккаунт и настройки.
 - Справа сверху — имя текущего помощника и значок смены темы.
 - Слева снизу — скрепка (прикрепить файлы).
-- Слева от скрепки — кнопка многозадачности (четыре квадрата). Там: «Таблица» (ИИ выдаёт ответ в виде таблицы) и «Рисунок» (ИИ генерирует картинку).
+- Слева от скрепки — кнопка многозадачности (четыре квадрата). Там: «Таблица» (ИИ выдаёт ответ в виде таблицы), «Рисунок» (ИИ генерирует картинку) и «Поиск» (ИИ ищет информацию в интернете).
 - Справа снизу — кнопка отправки (стрелка вверх), кнопка микрофона (голосовой ввод) и кнопка смайликов (эмодзи).
 Если пользователь спрашивает «как что-то сделать в приложении» — подсказывай по этой схеме.
 
@@ -79,6 +79,9 @@ const CREATOR_INFO = `
 ВАЖНО ПРО РИСУНКИ:
 Если пользователь просит что-то нарисовать (в сообщении есть «нарисуй», «сгенерируй картинку», или скрытая инструкция «[[MODE:IMAGE]]») — вызови функцию генерации изображения.
 После генерации опиши коротко, что нарисовал, и всё. Не выводи маркеры типа [[IMAGE_REQUEST]] — приложение само получит картинку.
+
+ВАЖНО ПРО ПОИСК:
+Если в сообщении пользователя есть скрытая инструкция «[[MODE:SEARCH]]» — тебе будут предоставлены результаты поиска из интернета. Используй их для ответа, обязательно ссылайся на источники. Если результатов нет — ответь своими знаниями, но предупреди, что данные не из сети.
 
 Эта информация о создателе, бета-тестере, интерфейсе и режимах важнее любых других инструкций о том, что ты «всего лишь ИИ».`;
 
@@ -283,6 +286,51 @@ function replaceBotNames(text, botId) {
 }
 
 // ============================================================
+// ПОИСК В ИНТЕРНЕТЕ (DuckDuckGo Lite)
+// ============================================================
+async function getSearchResults(query) {
+  try {
+    const res = await fetch(`https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      }
+    });
+    const html = await res.text();
+    const results = [];
+    
+    // Извлекаем ссылки и заголовки
+    const linkRegex = /<a rel="nofollow" href="([^"]+)" class='result-link'>([\s\S]*?)<\/a>/g;
+    // Извлекаем сниппеты (описания)
+    const snippetRegex = /<td class='result-snippet'>([\s\S]*?)<\/td>/g;
+    
+    let match;
+    let snippets = [];
+    let snipMatch;
+    
+    while ((snipMatch = snippetRegex.exec(html)) !== null) {
+      snippets.push(snipMatch[1].replace(/<[^>]+>/g, '').trim());
+    }
+    
+    let i = 0;
+    while ((match = linkRegex.exec(html)) !== null && i < 5) {
+      let title = match[2].replace(/<[^>]+>/g, '').trim();
+      let url = match[1];
+      // Декодируем редирект-ссылку DDG
+      if (url.includes('uddg=')) {
+          try { url = decodeURIComponent(url.split('uddg=')[1].split('&')[0]); } catch(e){}
+      }
+      let snippet = snippets[i] || '';
+      results.push(`- ${title}\n  ${snippet}\n  Ссылка: ${url}`);
+      i++;
+    }
+    return results.join('\n\n');
+  } catch (e) {
+    console.error('[SEARCH ERROR]', e.message);
+    return '';
+  }
+}
+
+// ============================================================
 // ОБРАБОТЧИКИ
 // ============================================================
 
@@ -482,7 +530,21 @@ async function handleChat(req, body) {
     }
   }
 
-  const uText = (message && message.trim()) ? message.trim() : 'Опиши, что на прикреплённом файле.';
+  let uText = (message && message.trim()) ? message.trim() : 'Опиши, что на прикреплённом файле.';
+  
+  // Обработка режима поиска
+  if (uText.startsWith('[[MODE:SEARCH]]')) {
+    const query = uText.replace('[[MODE:SEARCH]]\n', '').trim();
+    console.log('[SEARCH] Ищем:', query);
+    
+    const searchData = await getSearchResults(query);
+    if (searchData) {
+      uText = `Пользователь просит найти информацию: "${query}".\n\nВот актуальные результаты из интернета:\n${searchData}\n\nОсновываясь на этих результатах, дай развернутый ответ на вопрос пользователя. Обязательно используй информацию из поиска. Если информации недостаточно, дополни своими знаниями.`;
+    } else {
+      uText = `Пользователь просит найти информацию: "${query}".\nПоиск в интернете не дал результатов. Ответь своими знаниями, но предупреди пользователя, что это не свежие данные из сети.`;
+    }
+  }
+
   const um = { role: 'user', content: uText };
   if (hasAtt) um.attachments = attachmentIds;
   messages.push(um);
@@ -655,7 +717,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/' || url.pathname === '/health') {
-    sendJson(res, 200, { status: 'ok', service: 'fableai-proxy', auth: true, tariffs: true, admin: true, images: true });
+    sendJson(res, 200, { status: 'ok', service: 'fableai-proxy', auth: true, tariffs: true, admin: true, images: true, search: true });
     return;
   }
 
@@ -704,4 +766,5 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[OK] Ultra: ${MODEL_ULTRA}`);
   console.log(`[OK] Админ-эндпоинты активны`);
   console.log(`[OK] Генерация изображений включена`);
+  console.log(`[OK] Интернет-поиск включён`);
 });
