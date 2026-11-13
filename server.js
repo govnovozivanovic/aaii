@@ -1,5 +1,5 @@
 // ============================================================
-// FableAI — прокси + регистрация + тарифы + GigaChat + рисование + поиск + объяснение
+// FableAI — прокси + регистрация + тарифы + GigaChat + рисование + поиск + объяснение + кастомные персонажи
 // ============================================================
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -59,7 +59,7 @@ const CREATOR_INFO = `
 Если пользователь вообще без префикса и не утверждает, что он создатель — просто обычный пользователь, общайся как обычно.
 
 ИНТЕРФЕЙС ПРИЛОЖЕНИЯ (чтобы ты мог подсказать пользователю, если он спросит, куда нажать):
-- Слева сверху — кнопка меню (три полоски). Там: сохранённые чаты, смена собеседника (Юмэ/Веритус), аккаунт и настройки.
+- Слева сверху — кнопка меню (три полоски). Там: сохранённые чаты, смена собеседника (Юмэ/Веритус), аккаунт, настройки и плагины.
 - Справа сверху — имя текущего помощника и значок смены темы.
 - Слева снизу — скрепка (прикрепить файлы).
 - Слева от скрепки — кнопка многозадачности (четыре квадрата). Там: «Таблица» (ИИ выдаёт ответ в виде таблицы), «Рисунок» (ИИ генерирует картинку), «Поиск» (ИИ ищет информацию в интернете) и «Объясни» (ИИ объясняет простыми словами).
@@ -278,9 +278,14 @@ async function downloadFile(fileId, accessToken) {
 // ЗАМЕНА УПОМИНАНИЙ GIGACHAT НА ИМЯ БОТА
 // ============================================================
 
-function replaceBotNames(text, botId) {
+function replaceBotNames(text, botId, customName) {
   if (!text) return text;
-  const botName = botId === 'yume' ? 'Юмэ' : 'Веритус';
+  let botName;
+  if (customName) {
+    botName = customName;
+  } else {
+    botName = botId === 'yume' ? 'Юмэ' : 'Веритус';
+  }
   return text
     .replace(/GigaChat/gi, botName)
     .replace(/ГигаЧат/gi, botName)
@@ -489,8 +494,12 @@ async function handleChat(req, body) {
   const user = await getUserByToken(t);
   if (!user) return { status: 401, data: { error: 'Сессия истекла' } };
 
-  const { botId, message, history, modelType, blacklist, attachmentIds } = body;
-  if (!botId || !SYSTEM_PROMPTS[botId]) return { status: 400, data: { error: 'Invalid botId' } };
+  const { botId, message, history, modelType, blacklist, attachmentIds, customPrompt, customName } = body;
+
+  // Проверяем, что либо есть кастомный промпт, либо стандартный бот
+  if (!customPrompt && (!botId || !SYSTEM_PROMPTS[botId])) {
+    return { status: 400, data: { error: 'Invalid botId' } };
+  }
 
   const hasAtt = Array.isArray(attachmentIds) && attachmentIds.length > 0;
   if ((!message || !message.trim()) && !hasAtt) return { status: 400, data: { error: 'Empty message' } };
@@ -502,7 +511,19 @@ async function handleChat(req, body) {
   }
 
   const messages = [];
-  let sp = SYSTEM_PROMPTS[botId];
+
+  // ===== ВЫБОР СИСТЕМНОГО ПРОМПТА =====
+  let sp;
+  if (customPrompt) {
+    // Если это кастомный персонаж
+    sp = `Ты — ${customName}. Ты персонаж, созданный пользователем. Твой характер и поведение описаны ниже. Строго следуй этой инструкции:\n\n${customPrompt}\n\nВажно: никогда не называй себя GigaChat, ИИ или языковой моделью. Ты — ${customName}. Отвечай от первого лица в соответствии со своим характером.`;
+  } else if (SYSTEM_PROMPTS[botId]) {
+    // Если это стандартный бот
+    sp = SYSTEM_PROMPTS[botId];
+  } else {
+    // Если бот не найден (защита от ошибок)
+    sp = SYSTEM_PROMPTS['veritus'];
+  }
 
   sp += `\n\n=== ИНФОРМАЦИЯ О ТЕКУЩЕМ ПОЛЬЗОВАТЕЛЕ ===`;
   sp += `\nЛогин: ${user.username}`;
@@ -587,7 +608,7 @@ async function handleChat(req, body) {
   let imageBase64 = null;
 
   // === ЗАМЕНА УПОМИНАНИЙ GIGACHAT НА ИМЯ БОТА ===
-  reply = replaceBotNames(reply, botId);
+  reply = replaceBotNames(reply, botId, customName);
 
   const imgMatch = reply.match(/<img src="([^"]+)"/);
   if (imgMatch) {
@@ -726,7 +747,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/' || url.pathname === '/health') {
-    sendJson(res, 200, { status: 'ok', service: 'fableai-proxy', auth: true, tariffs: true, admin: true, images: true, search: true, explain: true });
+    sendJson(res, 200, { status: 'ok', service: 'fableai-proxy', auth: true, tariffs: true, admin: true, images: true, search: true, explain: true, customChars: true });
     return;
   }
 
@@ -777,4 +798,5 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[OK] Генерация изображений включена`);
   console.log(`[OK] Интернет-поиск включён`);
   console.log(`[OK] Режим "Объясни" включён`);
+  console.log(`[OK] Кастомные персонажи включены`);
 });
