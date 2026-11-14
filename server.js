@@ -956,7 +956,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/' || url.pathname === '/health') {
-    sendJson(res, 200, { status: 'ok', service: 'fableai-proxy', auth: true, tariffs: true, admin: true, images: true, search: true, explain: true, customChars: true, devApps: true, devAppUpdates: true, 3d: true });
+    sendJson(res, 200, { status: 'ok', service: 'fableai-proxy', auth: true, tariffs: true, admin: true, images: true, search: true, explain: true, customChars: true, devApps: true, devAppUpdates: true, '3d': true });
     return;
   }
 
