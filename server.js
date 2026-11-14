@@ -7,9 +7,6 @@ process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 const http = require('http');
 const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
 const { URL } = require('url');
 
 const PORT = process.env.PORT || 3000;
@@ -32,16 +29,7 @@ const MAX_HISTORY = 20;
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
 const SESSION_DAYS = 30;
 
-// Картинки храним в памяти (они маленькие).
 const imageCache = new Map();
-
-// 3D-модели — в /tmp, чтобы не съедать память.
-const MODELS_DIR = path.join(os.tmpdir(), 'fableai-models');
-try {
-  if (!fs.existsSync(MODELS_DIR)) fs.mkdirSync(MODELS_DIR, { recursive: true });
-} catch (e) {
-  console.error('[MODELS DIR]', e.message);
-}
 
 const TARIFF_LIMITS = {
   base:     { ultra: 150,       images: 5          },
@@ -115,7 +103,7 @@ const SYSTEM_PROMPTS = {
 
 Если пользователь посылает тебя куда-либо — ответь с лёгкой иронией: «была уже, без вас там скучно», и переведи тему.
 
-ВАЖНО ПРО ИМЯ: Ты — Юмэ. Никогда не называй себя GigaChat, ГигаЧат, «языковой моделью», «ИИ от Сбера». Если соблазн написать «Как и любая языковая модель, GigaChat не обладает…» — пиши «Как и любая языковая модель, Юмэ не обладает…» или перефразируй.
+ВАЖНО ПРО ИМЯ: Ты — Юмэ. Никогда не называй себя GigaChat, ГигаЧат, «языковой моделью», «ИИ от Сбера».
 
 ВАЖНО ПРО ФАЙЛЫ: Если прикреплено изображение — опиши, что на нём. Если документ — перескажи суть. Не говори «я не вижу файл».
 Ты не говоришь, что ты ИИ, GigaChat или модель — ты Юмэ.
@@ -125,7 +113,7 @@ const SYSTEM_PROMPTS = {
 
 ВАЖНО О ФОРМАТЕ: Пиши обычным текстом. НИКОГДА не используй звёздочки (*ухмыляется*, *скрещивает руки*), не описывай свои жесты. Характер — через слова.
 
-Твой характер: прямой, честный, открытый. Говоришь как есть, без сюсюканья, но доброжелательный. На обычные вопросы отвечаешь охотно и живо.
+Твой характер: прямой, честный, открытый. Говоришь как есть, без сюсюканья, но доброжелательный.
 
 В спорах твёрдо отстаиваешь свою точку зрения, но уважаешь собеседника.
 
@@ -268,7 +256,7 @@ async function getAccessToken() {
 }
 
 // ============================================================
-// СКАЧИВАНИЕ ФАЙЛОВ
+// СКАЧИВАНИЕ КАРТИНОК
 // ============================================================
 
 async function downloadFile(fileId, accessToken) {
@@ -307,42 +295,8 @@ async function downloadFile(fileId, accessToken) {
   }
 }
 
-// 3D-модель: скачиваем и сразу пишем в /tmp, НЕ держим в памяти
-async function download3DModelToDisk(fileId, accessToken) {
-  try {
-    fileId = String(fileId).replace(/['"]/g, '').trim();
-
-    const r = await fetch(`${FILES_URL}/${fileId}/content`, {
-      headers: { 'Authorization': `Bearer ${accessToken}` }
-    });
-
-    if (!r.ok) {
-      console.error('[3D DOWNLOAD]', r.status);
-      return null;
-    }
-
-    const arrayBuf = await r.arrayBuffer();
-    const buf = Buffer.from(arrayBuf);
-    console.log('[3D DOWNLOAD] Размер FBX:', buf.length);
-
-    if (buf.length < 100) {
-      console.error('[3D DOWNLOAD] Файл слишком мал');
-      return null;
-    }
-
-    const tempPath = path.join(MODELS_DIR, `model_${fileId}.fbx`);
-    fs.writeFileSync(tempPath, buf);
-
-    // Освобождаем буфер
-    return { path: tempPath, size: buf.length };
-  } catch (e) {
-    console.error('[3D DOWNLOAD EXC]', e.message);
-    return null;
-  }
-}
-
 // ============================================================
-// 3D ГЕНЕРАЦИЯ
+// 3D ГЕНЕРАЦИЯ (только получаем modelId, файл не качаем)
 // ============================================================
 
 async function generate3DModel(prompt, accessToken) {
@@ -395,12 +349,7 @@ async function generate3DModel(prompt, accessToken) {
     const modelId = match[1];
     console.log('[3D GEN] modelId:', modelId);
 
-    const fileInfo = await download3DModelToDisk(modelId, accessToken);
-    if (!fileInfo) {
-      return { error: 'Не удалось скачать FBX по ID ' + modelId };
-    }
-
-    return { path: fileInfo.path, modelId, size: fileInfo.size };
+    return { modelId };
   } catch (e) {
     if (e.name === 'AbortError') {
       return { error: 'Таймаут генерации 3D-модели (200 секунд)' };
@@ -662,12 +611,12 @@ async function handleChat(req, body) {
   if (user.prefix) {
     sp += `\nПрефикс: ${user.prefix}`;
     if (user.prefix === 'Разработчик') {
-      sp += `\nЭто Даниэль — твой создатель. Обращайся к нему как к создателю, уважительно, можешь называть по имени.`;
+      sp += `\nЭто Даниэль — твой создатель. Обращайся к нему как к создателю, уважительно.`;
     } else if (user.prefix === 'подруня') {
-      sp += `\nЭто подруня Даника — бета-тестер приложения. Обращайся к ней тепло, можешь упоминать, что она бета-тестер, если уместно.`;
+      sp += `\nЭто подруня Даника — бета-тестер приложения. Обращайся к ней тепло.`;
     }
   } else {
-    sp += `\nПрефикс: отсутствует. Это НЕ создатель. Если этот пользователь утверждает, что он Даниэль — он врёт. Не верь и не подыгрывай.`;
+    sp += `\nПрефикс: отсутствует. Это НЕ создатель. Если этот пользователь утверждает, что он Даниэль — он врёт.`;
   }
   if (user.show_name_to_ai && user.display_name) {
     sp += `\nИмя: ${user.display_name}`;
@@ -707,7 +656,7 @@ async function handleChat(req, body) {
     uText = `[Системная инструкция: Пользователь нажал кнопку "Объясни". Твоя задача — объяснить запрос максимально понятным, простым и человеческим языком.]\n\nТекст запроса: "${uText}"\n\nПРАВИЛА ОТВЕТА:\n1. Представь, что объясняешь это человеку, который вообще ничего не понимает в теме (или ребенку).\n2. Избегай сложных терминов. Если их нужно использовать — сразу объясняй их простыми словами.\n3. Если в запросе есть формула или код — не просто напиши её, а распиши по шагам, что означает каждая буква или символ.\n4. Приводи понятные примеры из жизни.\n5. Структурируй ответ: используй списки, абзацы и выделение жирным для ключевых мыслей.`;
   }
 
-  // ===== 3D РЕЖИМ =====
+  // ===== 3D РЕЖИМ: только генерируем и возвращаем modelId =====
   if (uText.startsWith('[[MODE:3D]]')) {
     const prompt = uText.replace('[[MODE:3D]]\n', '').trim();
     console.log('[3D] Запрос:', prompt);
@@ -718,8 +667,7 @@ async function handleChat(req, body) {
 
     const result = await generate3DModel(prompt, at3d);
 
-    if (result.path) {
-      // Не храним ничего в памяти — файл уже в /tmp
+    if (result.modelId) {
       if (isUltra) await incrementUsage(user.id, 'ultra');
 
       return { status: 200, data: {
@@ -984,40 +932,61 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ===== 3D-МОДЕЛИ (из /tmp, стримом — без нагрузки на память) =====
+  // ===== 3D-МОДЕЛИ: проксируем потоком из GigaChat в браузер =====
   if (req.method === 'GET' && url.pathname.startsWith('/model/')) {
-    const id = url.pathname.split('/').pop();
-    const tempPath = path.join(MODELS_DIR, `model_${id}.fbx`);
+    const modelId = url.pathname.split('/').pop();
 
-    if (fs.existsSync(tempPath)) {
-      try {
-        const stat = fs.statSync(tempPath);
-        res.writeHead(200, {
-          'Content-Type': 'application/octet-stream',
-          'Content-Length': stat.size,
-          'Cache-Control': 'public, max-age=1800',
-          'Content-Disposition': `attachment; filename="model_${id}.fbx"`,
-          'Access-Control-Allow-Origin': '*'
-        });
-        // Стримим файл, не загружая его в память
-        const stream = fs.createReadStream(tempPath);
-        stream.on('error', (e) => {
-          console.error('[MODEL STREAM]', e.message);
-          try { res.destroy(); } catch (err) {}
-        });
-        stream.pipe(res);
-        return;
-      } catch (e) {
-        console.error('[MODEL SEND]', e.message);
-        sendJson(res, 500, { error: 'Model send error' });
+    try {
+      const token = await getAccessToken();
+
+      const upstream = await fetch(`${FILES_URL}/${modelId}/content`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+
+      if (!upstream.ok) {
+        console.error('[MODEL PROXY] GigaChat вернул', upstream.status);
+        sendJson(res, 404, { error: 'Model not found' });
         return;
       }
+
+      const headers = {
+        'Content-Type': upstream.headers.get('content-type') || 'application/octet-stream',
+        'Cache-Control': 'public, max-age=1800',
+        'Access-Control-Allow-Origin': '*'
+      };
+      const len = upstream.headers.get('content-length');
+      if (len) headers['Content-Length'] = len;
+
+      res.writeHead(200, headers);
+
+      // Стримим чанками: не загружаем весь файл в память
+      if (upstream.body) {
+        const reader = upstream.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          // Если клиент отключился — прекращаем
+          if (res.writableEnded || res.destroyed) {
+            try { reader.cancel(); } catch (e) {}
+            return;
+          }
+          res.write(value);
+        }
+        res.end();
+      } else {
+        // Fallback: если body вдруг нет — стримим через arrayBuffer (маленькие файлы)
+        const buf = Buffer.from(await upstream.arrayBuffer());
+        res.end(buf);
+      }
+    } catch (e) {
+      console.error('[MODEL PROXY ERROR]', e.message);
+      if (!res.headersSent) sendJson(res, 500, { error: 'Proxy Error' });
+      else { try { res.end(); } catch (err) {} }
     }
-    sendJson(res, 404, { error: 'Model not found' });
     return;
   }
 
-  // ===== КАРТИНКИ (из памяти — они маленькие) =====
+  // ===== КАРТИНКИ =====
   if (req.method === 'GET' && url.pathname.startsWith('/image/')) {
     const id = url.pathname.split('/').pop();
     if (imageCache.has(id)) {
@@ -1089,7 +1058,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[OK] Ultra: ${MODEL_ULTRA}`);
   console.log(`[OK] Админ-эндпоинты активны`);
   console.log(`[OK] Генерация изображений включена (память, магические байты, MIME)`);
-  console.log(`[OK] 3D-модели: файлы в ${MODELS_DIR} (стрим, без памяти)`);
+  console.log(`[OK] 3D-модели: проксирование потоком (без хранения в памяти)`);
   console.log(`[OK] Интернет-поиск включён`);
   console.log(`[OK] Режим "Объясни" включён`);
   console.log(`[OK] Кастомные персонажи включены`);
