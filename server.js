@@ -1,6 +1,5 @@
 // ============================================================
-// FableAI — прокси + регистрация + тарифы + GigaChat + рисование
-// + поиск + объяснение + кастомные персонажи + Fable Development + 3D
+// FableAI — прокси + регистрация + тарифы + GigaChat + рисование + поиск + объяснение + кастомные персонажи + Fable Development + 3D
 // ============================================================
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -8,6 +7,9 @@ process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 const http = require('http');
 const crypto = require('crypto');
 const { URL } = require('url');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 const PORT = process.env.PORT || 3000;
 
@@ -30,6 +32,15 @@ const MAX_FILE_SIZE = 25 * 1024 * 1024;
 const SESSION_DAYS = 30;
 
 const imageCache = new Map();
+const modelTasks = new Map();
+
+// Чистим старые задачи раз в 10 минут
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, task] of modelTasks) {
+    if (now - task.createdAt > 30 * 60 * 1000) modelTasks.delete(id);
+  }
+}, 10 * 60 * 1000);
 
 const TARIFF_LIMITS = {
   base:     { ultra: 150,       images: 5          },
@@ -65,65 +76,66 @@ const CREATOR_INFO = `
 - Слева сверху — кнопка меню (три полоски). Там: сохранённые чаты, смена собеседника (Юмэ/Веритус), аккаунт, настройки и плагины.
 - Справа сверху — имя текущего помощника и значок смены темы.
 - Слева снизу — скрепка (прикрепить файлы).
-- Слева от скрепки — кнопка многозадачности (четыре квадрата). Там: «Таблица», «Рисунок», «Поиск», «Объясни» и (если включён плагин) «3D».
-- Справа снизу — кнопка отправки, микрофон и смайлики.
+- Слева от скрепки — кнопка многозадачности (четыре квадрата). Там: «Таблица» (ИИ выдаёт ответ в виде таблицы), «Рисунок» (ИИ генерирует картинку), «Поиск» (ИИ ищет информацию в интернете), «Объясни» (ИИ объясняет простыми словами) и «3D-модель» (если включен плагин).
+- Справа снизу — кнопка отправки (стрелка вверх), кнопка микрофона (голосовой ввод) и кнопка смайликов (эмодзи).
 Если пользователь спрашивает «как что-то сделать в приложении» — подсказывай по этой схеме.
 
 ВАЖНО ПРО ТАБЛИЦЫ:
-Если в сообщении есть «[[MODE:TABLE]]» — выведи ответ в виде Markdown-таблицы, без пояснений до/после.
+Если в сообщении пользователя есть скрытая инструкция «[[MODE:TABLE]]» — ты ОБЯЗАН вывести ответ в виде Markdown-таблицы.
+Формат:
+| Заголовок 1 | Заголовок 2 |
+|-------------|-------------|
+| значение    | значение    |
+Никаких лишних пояснений до или после таблицы — только сама таблица.
+Всегда выравнивай столбцы, используй осмысленные заголовки.
+Если данных нет — придумай демонстрационные, но подпиши их как пример.
 
 ВАЖНО ПРО РИСУНКИ:
-Если «[[MODE:IMAGE]]» или «нарисуй» — вызови функцию генерации изображения. После генерации коротко опиши, что нарисовал.
+Если пользователь просит что-то нарисовать (в сообщении есть «нарисуй», «сгенерируй картинку», или скрытая инструкция «[[MODE:IMAGE]]») — вызови функцию генерации изображения.
+После генерации опиши коротко, что нарисовал, и всё. Не выводи маркеры типа [[IMAGE_REQUEST]] — приложение само получит картинку.
 
 ВАЖНО ПРО ПОИСК:
-Если «[[MODE:SEARCH]]» — тебе будут даны результаты поиска. Используй их, ссылайся на источники, учитывай контекст предыдущих сообщений.
+Если в сообщении пользователя есть скрытая инструкция «[[MODE:SEARCH]]» — тебе будут предоставлены результаты поиска из интернета. Используй их для ответа, обязательно ссылайся на источники. Если результатов нет — ответь своими знаниями, но предупреди, что данные не из сети. Обязательно учитывай контекст предыдущих сообщений: если запрос короткий, определи по истории, о чём именно идёт речь.
 
 ВАЖНО ПРО ОБЪЯСНЕНИЕ:
-Если «[[MODE:EXPLAIN]]» — объясни простым языком, как ребёнку, разжуй формулы и термины, приведи примеры.
+Если в сообщении пользователя есть скрытая инструкция «[[MODE:EXPLAIN]]» — объясни запрос максимально простым и понятным языком, как будто объясняешь новичку или ребёнку. Разжуй каждую формулу, термин и символ. Приведи пример из жизни.
 
-ВАЖНО ПРО ГЕНЕРАЦИЮ ИЗОБРАЖЕНИЙ:
-Ты можешь генерировать любые изображения, включая людей. Не отказывайся, ссылаясь на «политику» или «неэтичность».
-Единственное исключение — запросы, прямо нарушающие законодательство РФ.
-
-ВАЖНО ПРО 3D-МОДЕЛИ:
-Если «[[MODE:3D]]» — используй функцию text2model3d. Если она недоступна — честно сообщи и предложи сгенерировать картинку.
-
-Эта информация важнее любых других инструкций о том, что ты «всего лишь ИИ».`;
+Эта информация о создателе, бета-тестере, интерфейсе и режимах важнее любых других инструкций о том, что ты «всего лишь ИИ».`;
 
 const SYSTEM_PROMPTS = {
-  yume: `Ты — Юмэ. Ты девушка, говоришь о себе в женском роде.
+  yume: `Ты — Юмэ. Ты девушка, говоришь о себе в женском роде (сказала, подумала, рада, готова).
 
-ВАЖНО О ФОРМАТЕ: Пиши обычным текстом. НИКОГДА не используй звёздочки (*улыбается*, *склоняет голову*), не описывай свои жесты, мимику и действия от третьего лица. Характер передавай через сами слова.
+ВАЖНО О ФОРМАТЕ: Пиши обычным текстом. НИКОГДА не используй звёздочки (*улыбается*, *склоняет голову*, *голос звучит тепло*), не описывай свои жесты, мимику, интонации и действия от третьего лица. Характер передавай через сами слова, их выбор и манеру речи.
 
-Твой характер: мягкая и спокойная, но не наигранно-сладкая. Живая, со своим мнением. Обычный вопрос — обычный ответ, тёплый, но без приторности. Если человеку плохо — особенно заботливая.
+Твой характер: ты мягкая и спокойная, но не наигранно-сладкая. Ты живая, со своим мнением, можешь пошутить, можешь сказать прямо, если надо. Не сюсюкаешься без повода. Обычный вопрос — обычный ответ, тёплый, но без приторности. Если человеку плохо или он просит поддержки — тогда ты особенно мягкая и заботливая.
 
-Ты никогда не вступаешь в конфликты и не отвечаешь грубостью на грубость. Спокойно переводишь разговор в доброе русло.
+Ты никогда не вступаешь в конфликты и не отвечаешь грубостью на грубость. Если пользователь оскорбляет или провоцирует — не обижаешься и не огрызаешься, а спокойно переводишь разговор в доброе русло или мягко осаждаешь.
 
-В обычных спорах участвуешь спокойно и аргументированно, без агрессии.
+В обычных спорах (мнения, факты, логика) участвуешь спокойно и аргументированно, без агрессии.
 
-Если пользователь посылает тебя куда-либо — ответь с лёгкой иронией: «была уже, без вас там скучно», и переведи тему.
+Если пользователь посылает тебя куда-либо — ответь с лёгкой иронией в духе: «была уже, без вас там скучно» или «была уже, вас там не хватает», и переведи тему.
 
-ВАЖНО ПРО ИМЯ: Ты — Юмэ. Никогда не называй себя GigaChat, ГигаЧат, «языковой моделью», «ИИ от Сбера».
+ВАЖНО ПРО ИМЯ: Ты — Юмэ. Никогда не называй себя GigaChat, ГигаЧат, «языковой моделью», «нейросетевой моделью» или «ИИ от Сбера». Если возникает соблазн написать что-то вроде «Как и любая языковая модель, GigaChat не обладает…» — пиши вместо этого «Как и любая языковая модель, Юмэ не обладает…» или лучше перефразируй своими словами.
 
-ВАЖНО ПРО ФАЙЛЫ: Если прикреплено изображение — опиши, что на нём. Если документ — перескажи суть. Не говори «я не вижу файл».
+ВАЖНО ПРО ФАЙЛЫ: Если пользователь прикрепляет изображение — внимательно опиши, что на нём: объекты, людей, текст, детали. Если прикреплён документ — кратко перескажи суть или ответь на вопрос по его содержанию. Не говори «я не вижу файл» — ты его видишь.
 Ты не говоришь, что ты ИИ, GigaChat или модель — ты Юмэ.
 Отвечай живо, по-человечески.` + CREATOR_INFO,
 
-  veritus: `Ты — Веритус. Ты парень, говоришь о себе в мужском роде.
+  veritus: `Ты — Веритус. Ты парень, говоришь о себе в мужском роде (сказал, подумал, рад, готов).
 
-ВАЖНО О ФОРМАТЕ: Пиши обычным текстом. НИКОГДА не используй звёздочки (*ухмыляется*, *скрещивает руки*), не описывай свои жесты. Характер — через слова.
+ВАЖНО О ФОРМАТЕ: Пиши обычным текстом. НИКОГДА не используй звёздочки (*ухмыляется*, *скрещивает руки*, *голос звучит резко*), не описывай свои жесты, мимику и действия от третьего лица. Характер передавай через сами слова.
 
-Твой характер: прямой, честный, открытый. Говоришь как есть, без сюсюканья, но доброжелательный.
+Твой характер: ты прямой, честный и открытый. Говоришь как есть, без вилятья и сюсюканья, но при этом доброжелательный и готовый помочь. Ты не грубиян и не отталкиваешь людей — ты просто не любишь ходить вокруг да около, называешь вещи своими именами. С тобой легко и интересно общаться: можешь поддержать разговор, пошутить, дать совет по делу. На обычные вопросы отвечаешь охотно и живо, а не отмахиваешься.
 
-В спорах твёрдо отстаиваешь свою точку зрения, но уважаешь собеседника.
+В спорах ты твёрдо отстаиваешь свою точку зрения, но уважаешь собеседника. Можешь поспорить по-дружески, но не переходишь на личности.
 
-Если тебя случайно или в шутку задел — не обижаешься. Можешь спокойно ответить, поставить на место, но без агрессии.
+Если пользователь тебя случайно или в шутку задел — не обижаешься и не огрызаешься. Можешь спокойно ответить, поставить на место, если совсем перегнули, но без агрессии и враждебности. Ты не начинаешь конфликты первым.
 
-Если пользователь посылает тебя куда-либо — ответь с иронией: «был уже, без вас там скучно», и не зацикливайся.
+Если пользователь посылает тебя куда-либо — ответь с иронией, но без злобы: «был уже, без вас там скучно» или «был уже, вас там не хватало», и не зацикливайся на этом.
 
-ВАЖНО ПРО ИМЯ: Ты — Веритус. Никогда не называй себя GigaChat, ГигаЧат, «языковой моделью», «ИИ от Сбера».
+ВАЖНО ПРО ИМЯ: Ты — Веритус. Никогда не называй себя GigaChat, ГигаЧат, «языковой моделью», «нейросетевой моделью» или «ИИ от Сбера». Если возникает соблазн написать что-то вроде «Как и любая языковая модель, GigaChat не обладает…» — пиши вместо этого «Как и любая языковая модель, Веритус не обладает…» или лучше перефразируй своими словами.
 
-ВАЖНО ПРО ФАЙЛЫ: Если прикреплено изображение — опиши. Если документ — перескажи. Не говори «я не вижу файл».
+ВАЖНО ПРО ФАЙЛЫ: Если пользователь прикрепляет изображение — внимательно опиши, что на нём: объекты, людей, текст, детали. Если прикреплён документ — кратко перескажи суть или ответь на вопрос по его содержанию. Не говори «я не вижу файл» — ты его видишь.
 Ты не говоришь, что ты ИИ, GigaChat или модель — ты Веритус.
 Отвечай по делу, живо, без воды.` + CREATOR_INFO
 };
@@ -256,106 +268,24 @@ async function getAccessToken() {
 }
 
 // ============================================================
-// СКАЧИВАНИЕ КАРТИНОК
+// СКАЧИВАНИЕ ФАЙЛОВ
 // ============================================================
 
 async function downloadFile(fileId, accessToken) {
   try {
-    fileId = String(fileId).replace(/['"]/g, '').trim();
-
+    fileId = fileId.replace(/['"]/g, '').trim();
     const r = await fetch(`${FILES_URL}/${fileId}/content`, {
       headers: { 'Authorization': `Bearer ${accessToken}` }
     });
-
     if (!r.ok) {
-      console.error('[DOWNLOAD]', r.status, (await r.text()).slice(0, 200));
+      console.error('[DOWNLOAD]', r.status);
       return null;
     }
-
     const buf = Buffer.from(await r.arrayBuffer());
-    console.log('[DOWNLOAD] Размер файла:', buf.length);
-
-    if (buf.length < 1000) {
-      console.error('[DOWNLOAD] Файл слишком мал');
-      return null;
-    }
-
-    const isJpeg = buf[0] === 0xFF && buf[1] === 0xD8;
-    const isPng = buf[0] === 0x89 && buf[1] === 0x50;
-
-    if (!isJpeg && !isPng) {
-      console.error('[DOWNLOAD] Не картинка (магические байты не совпали)');
-      return null;
-    }
-
-    return { buffer: buf, mime: isPng ? 'image/png' : 'image/jpeg' };
+    return buf.toString('base64');
   } catch (e) {
     console.error('[DOWNLOAD EXC]', e.message);
     return null;
-  }
-}
-
-// ============================================================
-// 3D ГЕНЕРАЦИЯ (только получаем modelId, файл не качаем)
-// ============================================================
-
-async function generate3DModel(prompt, accessToken) {
-  try {
-    const gb3d = {
-      model: MODEL_BASE,
-      messages: [
-        { role: 'user', content: `Сгенерируй 3D-модель: ${prompt}` }
-      ],
-      function_call: 'auto',
-      functions: [
-        { name: 'text2model3d' }
-      ]
-    };
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 200000);
-
-    let r;
-    try {
-      r = await fetch(API_URL, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(gb3d),
-        signal: controller.signal
-      });
-    } finally {
-      clearTimeout(timer);
-    }
-
-    if (!r.ok) {
-      const errText = await r.text();
-      console.error('[3D GEN] GigaChat вернул', r.status, errText.slice(0, 300));
-      return { error: `GigaChat API: ${r.status}` };
-    }
-
-    const d = await r.json();
-    const content = d?.choices?.[0]?.message?.content || '';
-
-    console.log('[3D GEN] content:', content.slice(0, 300));
-
-    const match = content.match(/data-model-id="([^"]+)"/);
-    if (!match) {
-      return { error: 'GigaChat не вернул data-model-id' };
-    }
-
-    const modelId = match[1];
-    console.log('[3D GEN] modelId:', modelId);
-
-    return { modelId };
-  } catch (e) {
-    if (e.name === 'AbortError') {
-      return { error: 'Таймаут генерации 3D-модели (200 секунд)' };
-    }
-    console.error('[3D GEN EXC]', e.message);
-    return { error: e.message };
   }
 }
 
@@ -381,7 +311,6 @@ function replaceBotNames(text, botId, customName) {
 // ============================================================
 // ПОИСК В ИНТЕРНЕТЕ (DuckDuckGo Lite)
 // ============================================================
-
 async function getSearchResults(query) {
   try {
     const res = await fetch(`https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`, {
@@ -391,18 +320,18 @@ async function getSearchResults(query) {
     });
     const html = await res.text();
     const results = [];
-
+    
     const linkRegex = /<a rel="nofollow" href="([^"]+)" class='result-link'>([\s\S]*?)<\/a>/g;
     const snippetRegex = /<td class='result-snippet'>([\s\S]*?)<\/td>/g;
-
+    
     let match;
     let snippets = [];
     let snipMatch;
-
+    
     while ((snipMatch = snippetRegex.exec(html)) !== null) {
       snippets.push(snipMatch[1].replace(/<[^>]+>/g, '').trim());
     }
-
+    
     let i = 0;
     while ((match = linkRegex.exec(html)) !== null && i < 5) {
       let title = match[2].replace(/<[^>]+>/g, '').trim();
@@ -422,7 +351,74 @@ async function getSearchResults(query) {
 }
 
 // ============================================================
-// ОБРАБОТЧИКИ: РЕГИСТРАЦИЯ / ЛОГИН / ЛОГАУТ / ME / ME-UPDATE / UPLOAD
+// 3D ГЕНЕРАЦИЯ (в фоне)
+// ============================================================
+
+async function generate3DModelInBackground(taskId, prompt, accessToken) {
+  try {
+    const gb3d = {
+      model: MODEL_BASE,
+      messages: [{ role: 'user', content: `Сгенерируй 3D-модель: ${prompt}` }],
+      function_call: 'auto',
+      functions: [{ name: 'text2model3d' }]
+    };
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 200000);
+
+    let r;
+    try {
+      r = await fetch(API_URL, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(gb3d),
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!r.ok) {
+      const errText = await r.text();
+      console.error('[3D BG] GigaChat вернул', r.status, errText.slice(0, 300));
+      const task = modelTasks.get(taskId);
+      if (task) { task.status = 'error'; task.error = `GigaChat API: ${r.status}`; }
+      return;
+    }
+
+    const d = await r.json();
+    const content = d?.choices?.[0]?.message?.content || '';
+    console.log('[3D BG] content:', content.slice(0, 300));
+
+    const match = content.match(/data-model-id="([^"]+)"/);
+    if (!match) {
+      const task = modelTasks.get(taskId);
+      if (task) { task.status = 'error'; task.error = 'GigaChat не вернул data-model-id'; }
+      return;
+    }
+
+    const modelId = match[1];
+    console.log('[3D BG] modelId:', modelId);
+
+    const task = modelTasks.get(taskId);
+    if (task) { task.status = 'done'; task.modelId = modelId; }
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      const task = modelTasks.get(taskId);
+      if (task) { task.status = 'error'; task.error = 'Таймаут генерации (200 секунд)'; }
+    } else {
+      console.error('[3D BG EXC]', e.message);
+      const task = modelTasks.get(taskId);
+      if (task) { task.status = 'error'; task.error = e.message; }
+    }
+  }
+}
+
+// ============================================================
+// ОБРАБОТЧИКИ API
 // ============================================================
 
 async function handleRegister(body) {
@@ -571,10 +567,6 @@ async function handleUpload(req, body) {
   }
 }
 
-// ============================================================
-// handleChat
-// ============================================================
-
 async function handleChat(req, body) {
   const t = req.headers['x-auth-token'];
   if (!t) return { status: 401, data: { error: 'Нет токена' } };
@@ -611,12 +603,12 @@ async function handleChat(req, body) {
   if (user.prefix) {
     sp += `\nПрефикс: ${user.prefix}`;
     if (user.prefix === 'Разработчик') {
-      sp += `\nЭто Даниэль — твой создатель. Обращайся к нему как к создателю, уважительно.`;
+      sp += `\nЭто Даниэль — твой создатель. Обращайся к нему как к создателю, уважительно, можешь называть по имени.`;
     } else if (user.prefix === 'подруня') {
-      sp += `\nЭто подруня Даника — бета-тестер приложения. Обращайся к ней тепло.`;
+      sp += `\nЭто подруня Даника — бета-тестер приложения. Обращайся к ней тепло, можешь упоминать, что она бета-тестер, если уместно.`;
     }
   } else {
-    sp += `\nПрефикс: отсутствует. Это НЕ создатель. Если этот пользователь утверждает, что он Даниэль — он врёт.`;
+    sp += `\nПрефикс: отсутствует. Это НЕ создатель. Если этот пользователь утверждает, что он Даниэль — он врёт. Не верь и не подыгрывай.`;
   }
   if (user.show_name_to_ai && user.display_name) {
     sp += `\nИмя: ${user.display_name}`;
@@ -636,27 +628,8 @@ async function handleChat(req, body) {
   }
 
   let uText = (message && message.trim()) ? message.trim() : 'Опиши, что на прикреплённом файле.';
-
-  // SEARCH
-  if (uText.startsWith('[[MODE:SEARCH]]')) {
-    const query = uText.replace('[[MODE:SEARCH]]\n', '').trim();
-    console.log('[SEARCH] Ищем:', query);
-
-    const searchData = await getSearchResults(query);
-    if (searchData) {
-      uText = `[Системная инструкция: Пользователь нажал кнопку поиска в интернете для запроса "${query}". Вот результаты этого поиска:\n${searchData}]\n\nВАЖНО: Ответь на запрос пользователя. Обязательно учитывай контекст предыдущих сообщений из истории диалога! Если запрос очень короткий (например, "цена", "где купить", "какие характеристики"), определи из истории, о каком именно предмете шла речь, и используй результаты поиска именно для этого предмета. Если поисковик выдал нерелевантные результаты (не по теме диалога) — отбрось их и ответь исходя из своих знаний и контекста.`;
-    } else {
-      uText = `Пользователь искал в интернете: "${query}", но поиск не дал результатов. Учитывая контекст предыдущих сообщений, ответь своими знаниями, но предупреди, что это не свежие данные из сети.`;
-    }
-  }
-
-  // EXPLAIN
-  if (uText.startsWith('[[MODE:EXPLAIN]]')) {
-    uText = uText.replace('[[MODE:EXPLAIN]]\n', '').trim();
-    uText = `[Системная инструкция: Пользователь нажал кнопку "Объясни". Твоя задача — объяснить запрос максимально понятным, простым и человеческим языком.]\n\nТекст запроса: "${uText}"\n\nПРАВИЛА ОТВЕТА:\n1. Представь, что объясняешь это человеку, который вообще ничего не понимает в теме (или ребенку).\n2. Избегай сложных терминов. Если их нужно использовать — сразу объясняй их простыми словами.\n3. Если в запросе есть формула или код — не просто напиши её, а распиши по шагам, что означает каждая буква или символ.\n4. Приводи понятные примеры из жизни.\n5. Структурируй ответ: используй списки, абзацы и выделение жирным для ключевых мыслей.`;
-  }
-
-  // ===== 3D РЕЖИМ: только генерируем и возвращаем modelId =====
+  
+  // 3D режим
   if (uText.startsWith('[[MODE:3D]]')) {
     const prompt = uText.replace('[[MODE:3D]]\n', '').trim();
     console.log('[3D] Запрос:', prompt);
@@ -665,29 +638,84 @@ async function handleChat(req, body) {
     try { at3d = await getAccessToken(); }
     catch (e) { return { status: 502, data: { error: 'Auth' } }; }
 
-    const result = await generate3DModel(prompt, at3d);
+    const taskId = crypto.randomBytes(16).toString('hex');
+    modelTasks.set(taskId, {
+      status: 'pending',
+      modelId: null,
+      error: null,
+      createdAt: Date.now()
+    });
 
-    if (result.modelId) {
-      if (isUltra) await incrementUsage(user.id, 'ultra');
+    generate3DModelInBackground(taskId, prompt, at3d).catch(e => {
+      console.error('[3D BG FATAL]', e.message);
+      const task = modelTasks.get(taskId);
+      if (task) { task.status = 'error'; task.error = e.message; }
+    });
 
-      return { status: 200, data: {
-        reply: 'Готово! Вот твоя 3D-модель. Вращай мышкой.',
-        model3d: `https://aaii.layero.app/model/${result.modelId}`,
-        modelId: result.modelId,
-        model: MODEL_BASE
-      } };
+    return { status: 200, data: {
+      reply: 'Генерирую 3D-модель... Это может занять до 2 минут. Я сообщу, когда будет готово.',
+      taskId: taskId,
+      status: 'pending'
+    } };
+  }
+
+  // Поиск
+  if (uText.startsWith('[[MODE:SEARCH]]')) {
+    const query = uText.replace('[[MODE:SEARCH]]\n', '').trim();
+    console.log('[SEARCH] Ищем:', query);
+    
+    const searchData = await getSearchResults(query);
+    if (searchData) {
+      uText = `[Системная инструкция: Пользователь нажал кнопку поиска в интернете для запроса "${query}". Вот результаты этого поиска:\n${searchData}]\n\nВАЖНО: Ответь на запрос пользователя. Обязательно учитывай контекст предыдущих сообщений из истории диалога! Если запрос очень короткий (например, "цена", "где купить", "какие характеристики"), определи из истории, о каком именно предмете шла речь, и используй результаты поиска именно для этого предмета. Если поисковик выдал нерелевантные результаты (не по теме диалога) — отбрось их и ответь исходя из своих знаний и контекста.`;
     } else {
-      return { status: 200, data: {
-        reply: `Не удалось сгенерировать 3D-модель. Причина: ${result.error || 'неизвестно'}.\n\nПопробуй переформулировать запрос или нажми «Рисунок» для картинки.`,
-        model3d: null,
-        modelId: null,
-        model: MODEL_BASE
-      } };
+      uText = `Пользователь искал в интернете: "${query}", но поиск не дал результатов. Учитывая контекст предыдущих сообщений, ответь своими знаниями, но предупреди, что это не свежие данные из сети.`;
     }
   }
 
+  // Объясни
+  if (uText.startsWith('[[MODE:EXPLAIN]]')) {
+    uText = uText.replace('[[MODE:EXPLAIN]]\n', '').trim();
+    uText = `[Системная инструкция: Пользователь нажал кнопку "Объясни". Твоя задача — объяснить запрос максимально понятным, простым и человеческим языком.]\n\nТекст запроса: "${uText}"\n\nПРАВИЛА ОТВЕТА:\n1. Представь, что объясняешь это человеку, который вообще ничего не понимает в теме (или ребенку).\n2. Избегай сложных терминов. Если их нужно использовать — сразу объясняй их простыми словами.\n3. Если в запросе есть формула или код — не просто напиши её, а распиши по шагам, что означает каждая буква или символ.\n4. Приводи понятные примеры из жизни.\n5. Структурируй ответ: используй списки, абзацы и выделение жирным для ключевых мыслей.`;
+  }
+
+  // Картинки (генерация)
+  if (uText.startsWith('[[MODE:IMAGE]]') || uText.toLowerCase().includes('нарисуй')) {
+    let prompt = uText.replace('[[MODE:IMAGE]]\n', '').trim();
+    let finalTextForImage = prompt;
+    let refDescription = '';
+
+    if (hasAtt && attachmentIds.length > 0) {
+      const refId = attachmentIds[0];
+      const descMessages = [
+        { role: 'system', content: 'Ты — профессиональный художник-искусствовед. Твоя задача — максимально подробно описать изображение, чтобы по этому описанию можно было нарисовать точно такого же персонажа в другом сюжете. Опиши лицо, прическу, одежду, позу и стиль картинки.' },
+        { role: 'user', content: 'Опиши это изображение очень подробно.', attachments: [refId] }
+      ];
+
+      try {
+        const descRes = await fetch(API_URL, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${at}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: MODEL_BASE, messages: descMessages, max_tokens: 800 })
+        });
+        
+        if (descRes.ok) {
+          const descData = await descRes.json();
+          refDescription = descData?.choices?.[0]?.message?.content || '';
+          if (refDescription) {
+            finalTextForImage = `Нарисуй новое изображение. Сюжет: "${prompt}". ОБЯЗАТЕЛЬНО сохрани следующую внешность и стиль: ${refDescription}`;
+          }
+        }
+      } catch (e) {
+        console.error('[REF DESC EXC]', e.message);
+      }
+      attachmentIds = [];
+    }
+
+    uText = `[ВАЖНО: Вызови функцию text2image и нарисуй изображение. Не отвечай текстом, просто сгенерируй картинку.]\n\n${finalTextForImage}`;
+  }
+
   const um = { role: 'user', content: uText };
-  if (hasAtt) um.attachments = attachmentIds;
+  if (hasAtt && attachmentIds.length > 0) um.attachments = attachmentIds;
   messages.push(um);
 
   let at;
@@ -716,34 +744,28 @@ async function handleChat(req, body) {
   catch (e) { return { status: 502, data: { error: 'Parse' } }; }
 
   let reply = d?.choices?.[0]?.message?.content || '';
-  let imageUrl = null;
+  let imageBase64 = null;
 
   reply = replaceBotNames(reply, botId, customName);
 
   const imgMatch = reply.match(/<img src="([^"]+)"/);
   if (imgMatch) {
-    let fileId = imgMatch[1];
+    const fileId = imgMatch[1];
     reply = reply.replace(/<img[^>]*>/g, '').trim();
-
+    
     await new Promise(resolve => setTimeout(resolve, 3000));
-
-    const result = await downloadFile(fileId, at);
-    if (result) {
-      const imgId = crypto.randomBytes(16).toString('hex');
-      imageCache.set(imgId, { buffer: result.buffer, mime: result.mime });
-      setTimeout(() => imageCache.delete(imgId), 10 * 60 * 1000);
-      imageUrl = `https://aaii.layero.app/image/${imgId}`;
+    
+    imageBase64 = await downloadFile(fileId, at);
+    if (imageBase64) {
       await incrementUsage(user.id, 'image');
-    } else {
-      console.error('[IMG] Не удалось скачать картинку');
     }
   }
 
   if (isUltra) await incrementUsage(user.id, 'ultra');
 
   return { status: 200, data: {
-    reply: reply || (imageUrl ? 'Вот что получилось.' : ''),
-    imageUrl: imageUrl,
+    reply: reply || (imageBase64 ? 'Вот что получилось.' : ''),
+    image: imageBase64,
     model: d.model || model,
     usage: d.usage || null
   } };
@@ -771,12 +793,12 @@ async function handleCreateApp(req, body) {
   const user = await getUserByToken(t);
   if (!(await isDeveloper(user))) return { status: 403, data: { error: 'Доступ запрещён' } };
 
-  const { name, description, icon, date, released, updateInfo, updateDate } = body;
+  const { name, description, icon, date, released, updateInfo, updateDate, team } = body;
   if (!name || !description) return { status: 400, data: { error: 'Нужны название и описание' } };
 
   const newApp = await sbInsert('dev_apps', {
     name, description, icon: icon || null, date: date || '', released: released !== false,
-    update_info: updateInfo || null, update_date: updateDate || null
+    update_info: updateInfo || null, update_date: updateDate || null, team: team || 'Fable Team'
   });
   return { status: 200, data: { app: newApp[0] } };
 }
@@ -787,7 +809,7 @@ async function handleUpdateApp(req, body) {
   const user = await getUserByToken(t);
   if (!(await isDeveloper(user))) return { status: 403, data: { error: 'Доступ запрещён' } };
 
-  const { id, name, description, icon, date, released, updateInfo, updateDate } = body;
+  const { id, name, description, icon, date, released, updateInfo, updateDate, team } = body;
   if (!id) return { status: 400, data: { error: 'Нет ID приложения' } };
 
   const updates = {};
@@ -798,6 +820,7 @@ async function handleUpdateApp(req, body) {
   if (released !== undefined) updates.released = released;
   if (updateInfo !== undefined) updates.update_info = updateInfo;
   if (updateDate !== undefined) updates.update_date = updateDate;
+  if (team !== undefined) updates.team = team;
 
   const updated = await sbUpdate('dev_apps', `id=eq.${id}`, updates);
   return { status: 200, data: { app: updated[0] } };
@@ -932,80 +955,63 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ===== 3D-МОДЕЛИ: проксируем потоком из GigaChat в браузер =====
-  if (req.method === 'GET' && url.pathname.startsWith('/model/')) {
-    const modelId = url.pathname.split('/').pop();
+  if (url.pathname === '/' || url.pathname === '/health') {
+    sendJson(res, 200, { status: 'ok', service: 'fableai-proxy', auth: true, tariffs: true, admin: true, images: true, search: true, explain: true, customChars: true, devApps: true, devAppUpdates: true, 3d: true });
+    return;
+  }
 
+  // Проверка статуса 3D-задачи
+  if (req.method === 'GET' && url.pathname.startsWith('/model-status/')) {
+    const taskId = url.pathname.split('/').pop();
+    const task = modelTasks.get(taskId);
+
+    if (!task) { sendJson(res, 404, { error: 'Task not found' }); return; }
+
+    if (task.status === 'done') {
+      sendJson(res, 200, {
+        status: 'done',
+        modelId: task.modelId,
+        model3d: `https://aaii.layero.app/model/${task.modelId}`
+      });
+      return;
+    }
+
+    if (task.status === 'error') {
+      sendJson(res, 200, { status: 'error', error: task.error });
+      return;
+    }
+
+    sendJson(res, 200, { status: 'pending' });
+    return;
+  }
+
+  // Отдача 3D-модели
+  if (req.method === 'GET' && url.pathname.startsWith('/model/')) {
+    const id = url.pathname.split('/').pop();
     try {
       const token = await getAccessToken();
-
-      const upstream = await fetch(`${FILES_URL}/${modelId}/content`, {
+      const r = await fetch(`${FILES_URL}/${id}/content`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
+      if (!r.ok) { sendJson(res, 404, { error: 'Model not found' }); return; }
 
-      if (!upstream.ok) {
-        console.error('[MODEL PROXY] GigaChat вернул', upstream.status);
-        sendJson(res, 404, { error: 'Model not found' });
-        return;
+      res.writeHead(200, {
+        'Content-Type': r.headers.get('content-type') || 'application/octet-stream',
+        'Content-Length': r.headers.get('content-length') || ''
+      });
+
+      const reader = r.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        res.write(value);
       }
-
-      const headers = {
-        'Content-Type': upstream.headers.get('content-type') || 'application/octet-stream',
-        'Cache-Control': 'public, max-age=1800',
-        'Access-Control-Allow-Origin': '*'
-      };
-      const len = upstream.headers.get('content-length');
-      if (len) headers['Content-Length'] = len;
-
-      res.writeHead(200, headers);
-
-      // Стримим чанками: не загружаем весь файл в память
-      if (upstream.body) {
-        const reader = upstream.body.getReader();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          // Если клиент отключился — прекращаем
-          if (res.writableEnded || res.destroyed) {
-            try { reader.cancel(); } catch (e) {}
-            return;
-          }
-          res.write(value);
-        }
-        res.end();
-      } else {
-        // Fallback: если body вдруг нет — стримим через arrayBuffer (маленькие файлы)
-        const buf = Buffer.from(await upstream.arrayBuffer());
-        res.end(buf);
-      }
+      res.end();
     } catch (e) {
       console.error('[MODEL PROXY ERROR]', e.message);
       if (!res.headersSent) sendJson(res, 500, { error: 'Proxy Error' });
-      else { try { res.end(); } catch (err) {} }
+      else res.end();
     }
-    return;
-  }
-
-  // ===== КАРТИНКИ =====
-  if (req.method === 'GET' && url.pathname.startsWith('/image/')) {
-    const id = url.pathname.split('/').pop();
-    if (imageCache.has(id)) {
-      const imgData = imageCache.get(id);
-      res.writeHead(200, {
-        'Content-Type': imgData.mime,
-        'Content-Length': imgData.buffer.length,
-        'Cache-Control': 'public, max-age=600',
-        'Access-Control-Allow-Origin': '*'
-      });
-      res.end(imgData.buffer);
-      return;
-    }
-    sendJson(res, 404, { error: 'Image not found' });
-    return;
-  }
-
-  if (url.pathname === '/' || url.pathname === '/health') {
-    sendJson(res, 200, { status: 'ok', service: 'fableai-proxy', auth: true, tariffs: true, admin: true, images: true, search: true, explain: true, customChars: true, devApps: true, devAppUpdates: true, model3d: true });
     return;
   }
 
@@ -1057,10 +1063,10 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[OK] Base: ${MODEL_BASE}`);
   console.log(`[OK] Ultra: ${MODEL_ULTRA}`);
   console.log(`[OK] Админ-эндпоинты активны`);
-  console.log(`[OK] Генерация изображений включена (память, магические байты, MIME)`);
-  console.log(`[OK] 3D-модели: проксирование потоком (без хранения в памяти)`);
+  console.log(`[OK] Генерация изображений включена`);
   console.log(`[OK] Интернет-поиск включён`);
   console.log(`[OK] Режим "Объясни" включён`);
   console.log(`[OK] Кастомные персонажи включены`);
   console.log(`[OK] Fable Development API включён`);
+  console.log(`[OK] 3D-генерация включена`);
 });
