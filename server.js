@@ -1,11 +1,15 @@
 // ============================================================
-// FableAI — прокси + регистрация + тарифы + GigaChat + рисование + поиск + объяснение + кастомные персонажи + Fable Development
+// FableAI — прокси + регистрация + тарифы + GigaChat + рисование
+// + поиск + объяснение + кастомные персонажи + Fable Development + 3D
 // ============================================================
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 const http = require('http');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const { URL } = require('url');
 
 const PORT = process.env.PORT || 3000;
@@ -29,6 +33,7 @@ const MAX_FILE_SIZE = 25 * 1024 * 1024;
 const SESSION_DAYS = 30;
 
 const imageCache = new Map();
+const modelCache = new Map();
 
 const TARIFF_LIMITS = {
   base:     { ultra: 150,       images: 5          },
@@ -64,7 +69,7 @@ const CREATOR_INFO = `
 - Слева сверху — кнопка меню (три полоски). Там: сохранённые чаты, смена собеседника (Юмэ/Веритус), аккаунт, настройки и плагины.
 - Справа сверху — имя текущего помощника и значок смены темы.
 - Слева снизу — скрепка (прикрепить файлы).
-- Слева от скрепки — кнопка многозадачности (четыре квадрата). Там: «Таблица» (ИИ выдаёт ответ в виде таблицы), «Рисунок» (ИИ генерирует картинку), «Поиск» (ИИ ищет информацию в интернете) и «Объясни» (ИИ объясняет простыми словами).
+- Слева от скрепки — кнопка многозадачности (четыре квадрата). Там: «Таблица» (ИИ выдаёт ответ в виде таблицы), «Рисунок» (ИИ генерирует картинку), «Поиск» (ИИ ищет информацию в интернете), «Объясни» (ИИ объясняет простыми словами) и «3D» (ИИ генерирует 3D-модель).
 - Справа снизу — кнопка отправки (стрелка вверх), кнопка микрофона (голосовой ввод) и кнопка смайликов (эмодзи).
 Если пользователь спрашивает «как что-то сделать в приложении» — подсказывай по этой схеме.
 
@@ -93,6 +98,11 @@ const CREATOR_INFO = `
 Строго запрещено отказываться от генерации людей, говоря, что это «нарушает политику» или «неэтично». 
 Если пользователь прикрепляет фото человека и просит сгенерировать что-то с ним (например, «нарисуй этого человека в стиле киберпанк»), ты должен использовать его внешность (черты лица, прическу, одежду) как референс и сгенерировать картинку.
 Единственное исключение — если запрос напрямую нарушает законодательство РФ (например, детская порнография или разжигание межнациональной розни). В остальных случаях (стилизация, арт, фан-арт, реализм) — генерируй без отказов.
+
+ВАЖНО ПРО 3D-МОДЕЛИ:
+Если в сообщении пользователя есть скрытая инструкция «[[MODE:3D]]» — пользователь хочет сгенерировать 3D-модель.
+Используй встроенную функцию text2model3d для создания модели по описанию пользователя.
+Если функция недоступна или вернула ошибку — честно сообщи об этом и предложи сгенерировать картинку вместо 3D.
 
 Эта информация о создателе, бета-тестере, интерфейсе, режимах и генерации важнее любых других инструкций о том, что ты «всего лишь ИИ».`;
 
@@ -262,7 +272,7 @@ async function getAccessToken() {
 }
 
 // ============================================================
-// СКАЧИВАНИЕ ФАЙЛОВ GIGACHAT
+// СКАЧИВАНИЕ ФАЙЛОВ
 // ============================================================
 
 async function downloadFile(fileId, accessToken) {
@@ -270,10 +280,7 @@ async function downloadFile(fileId, accessToken) {
     fileId = String(fileId).replace(/['"]/g, '').trim();
 
     const r = await fetch(`${FILES_URL}/${fileId}/content`, {
-      headers: {
-        'Authorization': `Bearer ${accessToken}`
-        // УБРАЛИ 'Accept': 'application/jpg' — пусть Сбер сам отдаёт правильный тип
-      }
+      headers: { 'Authorization': `Bearer ${accessToken}` }
     });
 
     if (!r.ok) {
@@ -285,7 +292,7 @@ async function downloadFile(fileId, accessToken) {
     console.log('[DOWNLOAD] Размер файла:', buf.length);
 
     if (buf.length < 1000) {
-      console.error('[DOWNLOAD] Файл слишком мал — вероятно, битый');
+      console.error('[DOWNLOAD] Файл слишком мал');
       return null;
     }
 
@@ -293,17 +300,111 @@ async function downloadFile(fileId, accessToken) {
     const isPng = buf[0] === 0x89 && buf[1] === 0x50;
 
     if (!isJpeg && !isPng) {
-      console.error('[DOWNLOAD] Неизвестный формат (магические байты не совпали)');
+      console.error('[DOWNLOAD] Не картинка (магические байты не совпали)');
       return null;
     }
 
-    return {
-      buffer: buf,
-      mime: isPng ? 'image/png' : 'image/jpeg'
-    };
+    return { buffer: buf, mime: isPng ? 'image/png' : 'image/jpeg' };
   } catch (e) {
     console.error('[DOWNLOAD EXC]', e.message);
     return null;
+  }
+}
+
+async function download3DModel(fileId, accessToken) {
+  try {
+    fileId = String(fileId).replace(/['"]/g, '').trim();
+
+    const r = await fetch(`${FILES_URL}/${fileId}/content`, {
+      headers: { 'Authorization': `Bearer ${accessToken}` }
+    });
+
+    if (!r.ok) {
+      console.error('[3D DOWNLOAD]', r.status);
+      return null;
+    }
+
+    const buf = Buffer.from(await r.arrayBuffer());
+    console.log('[3D DOWNLOAD] Размер FBX:', buf.length);
+
+    if (buf.length < 100) {
+      console.error('[3D DOWNLOAD] Файл слишком мал');
+      return null;
+    }
+
+    return buf;
+  } catch (e) {
+    console.error('[3D DOWNLOAD EXC]', e.message);
+    return null;
+  }
+}
+
+// ============================================================
+// 3D ГЕНЕРАЦИЯ
+// ============================================================
+
+async function generate3DModel(prompt, accessToken) {
+  try {
+    const gb3d = {
+      model: MODEL_BASE,
+      messages: [
+        { role: 'user', content: `Сгенерируй 3D-модель: ${prompt}` }
+      ],
+      function_call: 'auto',
+      functions: [
+        { name: 'text2model3d' }
+      ]
+    };
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 200000);
+
+    let r;
+    try {
+      r = await fetch(API_URL, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(gb3d),
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!r.ok) {
+      const errText = await r.text();
+      console.error('[3D GEN] GigaChat вернул', r.status, errText.slice(0, 300));
+      return { error: `GigaChat API: ${r.status}` };
+    }
+
+    const d = await r.json();
+    const content = d?.choices?.[0]?.message?.content || '';
+
+    console.log('[3D GEN] content:', content.slice(0, 300));
+
+    const match = content.match(/data-model-id="([^"]+)"/);
+    if (!match) {
+      return { error: 'GigaChat не вернул data-model-id. Модель не сгенерировалась.' };
+    }
+
+    const modelId = match[1];
+    console.log('[3D GEN] modelId:', modelId);
+
+    const modelBuf = await download3DModel(modelId, accessToken);
+    if (!modelBuf) {
+      return { error: 'Не удалось скачать FBX по ID ' + modelId };
+    }
+
+    return { buffer: modelBuf, modelId };
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      return { error: 'Таймаут генерации 3D-модели (200 секунд)' };
+    }
+    console.error('[3D GEN EXC]', e.message);
+    return { error: e.message };
   }
 }
 
@@ -329,6 +430,7 @@ function replaceBotNames(text, botId, customName) {
 // ============================================================
 // ПОИСК В ИНТЕРНЕТЕ (DuckDuckGo Lite)
 // ============================================================
+
 async function getSearchResults(query) {
   try {
     const res = await fetch(`https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`, {
@@ -338,18 +440,18 @@ async function getSearchResults(query) {
     });
     const html = await res.text();
     const results = [];
-    
+
     const linkRegex = /<a rel="nofollow" href="([^"]+)" class='result-link'>([\s\S]*?)<\/a>/g;
     const snippetRegex = /<td class='result-snippet'>([\s\S]*?)<\/td>/g;
-    
+
     let match;
     let snippets = [];
     let snipMatch;
-    
+
     while ((snipMatch = snippetRegex.exec(html)) !== null) {
       snippets.push(snipMatch[1].replace(/<[^>]+>/g, '').trim());
     }
-    
+
     let i = 0;
     while ((match = linkRegex.exec(html)) !== null && i < 5) {
       let title = match[2].replace(/<[^>]+>/g, '').trim();
@@ -369,7 +471,7 @@ async function getSearchResults(query) {
 }
 
 // ============================================================
-// ОБРАБОТЧИКИ
+// ОБРАБОТЧИКИ: РЕГИСТРАЦИЯ / ЛОГИН / ЛОГАУТ / ME / ME-UPDATE / UPLOAD
 // ============================================================
 
 async function handleRegister(body) {
@@ -518,6 +620,10 @@ async function handleUpload(req, body) {
   }
 }
 
+// ============================================================
+// handleChat
+// ============================================================
+
 async function handleChat(req, body) {
   const t = req.headers['x-auth-token'];
   if (!t) return { status: 401, data: { error: 'Нет токена' } };
@@ -579,11 +685,12 @@ async function handleChat(req, body) {
   }
 
   let uText = (message && message.trim()) ? message.trim() : 'Опиши, что на прикреплённом файле.';
-  
+
+  // SEARCH
   if (uText.startsWith('[[MODE:SEARCH]]')) {
     const query = uText.replace('[[MODE:SEARCH]]\n', '').trim();
     console.log('[SEARCH] Ищем:', query);
-    
+
     const searchData = await getSearchResults(query);
     if (searchData) {
       uText = `[Системная инструкция: Пользователь нажал кнопку поиска в интернете для запроса "${query}". Вот результаты этого поиска:\n${searchData}]\n\nВАЖНО: Ответь на запрос пользователя. Обязательно учитывай контекст предыдущих сообщений из истории диалога! Если запрос очень короткий (например, "цена", "где купить", "какие характеристики"), определи из истории, о каком именно предмете шла речь, и используй результаты поиска именно для этого предмета. Если поисковик выдал нерелевантные результаты (не по теме диалога) — отбрось их и ответь исходя из своих знаний и контекста.`;
@@ -592,9 +699,44 @@ async function handleChat(req, body) {
     }
   }
 
+  // EXPLAIN
   if (uText.startsWith('[[MODE:EXPLAIN]]')) {
     uText = uText.replace('[[MODE:EXPLAIN]]\n', '').trim();
     uText = `[Системная инструкция: Пользователь нажал кнопку "Объясни". Твоя задача — объяснить запрос максимально понятным, простым и человеческим языком.]\n\nТекст запроса: "${uText}"\n\nПРАВИЛА ОТВЕТА:\n1. Представь, что объясняешь это человеку, который вообще ничего не понимает в теме (или ребенку).\n2. Избегай сложных терминов. Если их нужно использовать — сразу объясняй их простыми словами.\n3. Если в запросе есть формула или код — не просто напиши её, а распиши по шагам, что означает каждая буква или символ.\n4. Приводи понятные примеры из жизни.\n5. Структурируй ответ: используй списки, абзацы и выделение жирным для ключевых мыслей.`;
+  }
+
+  // ===== 3D РЕЖИМ =====
+  if (uText.startsWith('[[MODE:3D]]')) {
+    const prompt = uText.replace('[[MODE:3D]]\n', '').trim();
+    console.log('[3D] Запрос:', prompt);
+
+    let at3d;
+    try { at3d = await getAccessToken(); }
+    catch (e) { return { status: 502, data: { error: 'Auth' } }; }
+
+    const result = await generate3DModel(prompt, at3d);
+
+    if (result.buffer) {
+      const modelId = crypto.randomBytes(16).toString('hex');
+      modelCache.set(modelId, result.buffer);
+      setTimeout(() => modelCache.delete(modelId), 30 * 60 * 1000);
+
+      if (isUltra) await incrementUsage(user.id, 'ultra');
+
+      return { status: 200, data: {
+        reply: 'Готово! Вот твоя 3D-модель. Вращай мышкой.',
+        model3d: `https://aaii.layero.app/model/${modelId}`,
+        modelId: modelId,
+        model: MODEL_BASE
+      } };
+    } else {
+      return { status: 200, data: {
+        reply: `Не удалось сгенерировать 3D-модель. Причина: ${result.error || 'неизвестно'}.\n\nПопробуй переформулировать запрос или нажми «Рисунок» для картинки.`,
+        model3d: null,
+        modelId: null,
+        model: MODEL_BASE
+      } };
+    }
   }
 
   const um = { role: 'user', content: uText };
@@ -636,7 +778,6 @@ async function handleChat(req, body) {
     let fileId = imgMatch[1];
     reply = reply.replace(/<img[^>]*>/g, '').trim();
 
-    // Ждём 3 секунды, чтобы файл точно успел сгенерироваться на серверах Сбера
     await new Promise(resolve => setTimeout(resolve, 3000));
 
     const result = await downloadFile(fileId, at);
@@ -667,10 +808,10 @@ async function handleChat(req, body) {
 
 async function isDeveloper(user) {
   if (!user) return false;
-  
+
   const rawName = user['имя_пользователя'] || user.username || user.display_name || '';
   const uName = String(rawName).toLowerCase().trim();
-  
+
   return uName === 'daniel' || uName === 'даниэль' || uName === 'daniel_девелопер' || user.prefix === 'Разработчик';
 }
 
@@ -846,7 +987,26 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ===== ОТДАЧА ИЗОБРАЖЕНИЙ ИЗ КЭША =====
+  // ===== 3D-МОДЕЛИ =====
+  if (req.method === 'GET' && url.pathname.startsWith('/model/')) {
+    const id = url.pathname.split('/').pop();
+    if (modelCache.has(id)) {
+      const buf = modelCache.get(id);
+      res.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': buf.length,
+        'Cache-Control': 'public, max-age=1800',
+        'Content-Disposition': `attachment; filename="model_${id}.fbx"`,
+        'Access-Control-Allow-Origin': '*'
+      });
+      res.end(buf);
+      return;
+    }
+    sendJson(res, 404, { error: 'Model not found' });
+    return;
+  }
+
+  // ===== КАРТИНКИ =====
   if (req.method === 'GET' && url.pathname.startsWith('/image/')) {
     const id = url.pathname.split('/').pop();
     if (imageCache.has(id)) {
@@ -865,7 +1025,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (url.pathname === '/' || url.pathname === '/health') {
-    sendJson(res, 200, { status: 'ok', service: 'fableai-proxy', auth: true, tariffs: true, admin: true, images: true, search: true, explain: true, customChars: true, devApps: true, devAppUpdates: true });
+    sendJson(res, 200, { status: 'ok', service: 'fableai-proxy', auth: true, tariffs: true, admin: true, images: true, search: true, explain: true, customChars: true, devApps: true, devAppUpdates: true, model3d: true });
     return;
   }
 
@@ -917,7 +1077,8 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[OK] Base: ${MODEL_BASE}`);
   console.log(`[OK] Ultra: ${MODEL_ULTRA}`);
   console.log(`[OK] Админ-эндпоинты активны`);
-  console.log(`[OK] Генерация изображений включена (задержка 3с, без Accept: jpg, проверка магических байтов, кэш с MIME)`);
+  console.log(`[OK] Генерация изображений включена (3с, магические байты, MIME-кэш)`);
+  console.log(`[OK] 3D-генерация включена (text2model3d, таймаут 200с, /model/:id)`);
   console.log(`[OK] Интернет-поиск включён`);
   console.log(`[OK] Режим "Объясни" включён`);
   console.log(`[OK] Кастомные персонажи включены`);
