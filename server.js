@@ -28,7 +28,7 @@ const MAX_HISTORY = 20;
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
 const SESSION_DAYS = 30;
 
-const imageCache = new Map(); // Временное хранилище картинок в памяти
+const imageCache = new Map();
 
 const TARIFF_LIMITS = {
   base:     { ultra: 150,       images: 5          },
@@ -262,20 +262,45 @@ async function getAccessToken() {
 }
 
 // ============================================================
-// ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ
+// СКАЧИВАНИЕ ФАЙЛОВ GIGACHAT
 // ============================================================
 
 async function downloadFile(fileId, accessToken) {
   try {
+    fileId = String(fileId).replace(/['"]/g, '').trim();
+
     const r = await fetch(`${FILES_URL}/${fileId}/content`, {
-      headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/jpg' }
+      headers: {
+        'Authorization': `Bearer ${accessToken}`
+        // УБРАЛИ 'Accept': 'application/jpg' — пусть Сбер сам отдаёт правильный тип
+      }
     });
+
     if (!r.ok) {
-      console.error('[DOWNLOAD]', r.status);
+      console.error('[DOWNLOAD]', r.status, (await r.text()).slice(0, 200));
       return null;
     }
+
     const buf = Buffer.from(await r.arrayBuffer());
-    return buf.toString('base64');
+    console.log('[DOWNLOAD] Размер файла:', buf.length);
+
+    if (buf.length < 1000) {
+      console.error('[DOWNLOAD] Файл слишком мал — вероятно, битый');
+      return null;
+    }
+
+    const isJpeg = buf[0] === 0xFF && buf[1] === 0xD8;
+    const isPng = buf[0] === 0x89 && buf[1] === 0x50;
+
+    if (!isJpeg && !isPng) {
+      console.error('[DOWNLOAD] Неизвестный формат (магические байты не совпали)');
+      return null;
+    }
+
+    return {
+      buffer: buf,
+      mime: isPng ? 'image/png' : 'image/jpeg'
+    };
   } catch (e) {
     console.error('[DOWNLOAD EXC]', e.message);
     return null;
@@ -608,39 +633,21 @@ async function handleChat(req, body) {
 
   const imgMatch = reply.match(/<img src="([^"]+)"/);
   if (imgMatch) {
-    const fileId = imgMatch[1];
+    let fileId = imgMatch[1];
     reply = reply.replace(/<img[^>]*>/g, '').trim();
-    
-    try {
-      // Ждем 2 секунды, чтобы файл успел сгенерироваться на серверах Сбера
-      await new Promise(resolve => setTimeout(resolve, 2000));
 
-      const r2 = await fetch(`${FILES_URL}/${fileId}/content`, {
-        headers: { 'Authorization': `Bearer ${at}` }
-      });
+    // Ждём 3 секунды, чтобы файл точно успел сгенерироваться на серверах Сбера
+    await new Promise(resolve => setTimeout(resolve, 3000));
 
-      if (!r2.ok) throw new Error(`HTTP ${r2.status}`);
-
-      const buf = Buffer.from(await r2.arrayBuffer());
-      
-      // Проверяем, что это реально картинка (JPEG или PNG), а не пустой файл
-      const isJpeg = buf.length > 1000 && buf[0] === 0xFF && buf[1] === 0xD8;
-      const isPng = buf.length > 1000 && buf[0] === 0x89 && buf[1] === 0x50;
-
-      if (isJpeg || isPng) {
-        const imgId = crypto.randomBytes(16).toString('hex');
-        const mimeType = isPng ? 'image/png' : 'image/jpeg';
-
-        imageCache.set(imgId, { buffer: buf, mime: mimeType });
-        setTimeout(() => imageCache.delete(imgId), 10 * 60 * 1000);
-        
-        imageUrl = `https://aaii.layero.app/image/${imgId}`;
-        await incrementUsage(user.id, 'image');
-      } else {
-        console.error('[IMG ERROR] Файл скачался, но это не картинка (или файл битый)');
-      }
-    } catch (e) {
-      console.error('[IMG SAVE ERROR]', e.message);
+    const result = await downloadFile(fileId, at);
+    if (result) {
+      const imgId = crypto.randomBytes(16).toString('hex');
+      imageCache.set(imgId, { buffer: result.buffer, mime: result.mime });
+      setTimeout(() => imageCache.delete(imgId), 10 * 60 * 1000);
+      imageUrl = `https://aaii.layero.app/image/${imgId}`;
+      await incrementUsage(user.id, 'image');
+    } else {
+      console.error('[IMG] Не удалось скачать картинку');
     }
   }
 
@@ -910,7 +917,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[OK] Base: ${MODEL_BASE}`);
   console.log(`[OK] Ultra: ${MODEL_ULTRA}`);
   console.log(`[OK] Админ-эндпоинты активны`);
-  console.log(`[OK] Генерация изображений включена (imageUrl + кэш + задержка 2с + проверка магических байтов)`);
+  console.log(`[OK] Генерация изображений включена (задержка 3с, без Accept: jpg, проверка магических байтов, кэш с MIME)`);
   console.log(`[OK] Интернет-поиск включён`);
   console.log(`[OK] Режим "Объясни" включён`);
   console.log(`[OK] Кастомные персонажи включены`);
