@@ -314,9 +314,7 @@ async function getSearchResults(query) {
     const html = await res.text();
     const results = [];
     
-    // Извлекаем ссылки и заголовки
     const linkRegex = /<a rel="nofollow" href="([^"]+)" class='result-link'>([\s\S]*?)<\/a>/g;
-    // Извлекаем сниппеты (описания)
     const snippetRegex = /<td class='result-snippet'>([\s\S]*?)<\/td>/g;
     
     let match;
@@ -331,7 +329,6 @@ async function getSearchResults(query) {
     while ((match = linkRegex.exec(html)) !== null && i < 5) {
       let title = match[2].replace(/<[^>]+>/g, '').trim();
       let url = match[1];
-      // Декодируем редирект-ссылку DDG
       if (url.includes('uddg=')) {
           try { url = decodeURIComponent(url.split('uddg=')[1].split('&')[0]); } catch(e){}
       }
@@ -504,7 +501,6 @@ async function handleChat(req, body) {
 
   const { botId, message, history, modelType, blacklist, attachmentIds, customPrompt, customName } = body;
 
-  // Проверяем, что либо есть кастомный промпт, либо стандартный бот
   if (!botId && !customPrompt) return { status: 400, data: { error: 'Invalid botId' } };
   if (!customPrompt && !SYSTEM_PROMPTS[botId]) return { status: 400, data: { error: 'Invalid botId' } };
 
@@ -519,16 +515,12 @@ async function handleChat(req, body) {
 
   const messages = [];
 
-  // ===== ВЫБОР СИСТЕМНОГО ПРОМПТА =====
   let sp;
   if (customPrompt) {
-    // Если это кастомный персонаж
     sp = `Ты — ${customName}. Ты персонаж, созданный пользователем. Твой характер и поведение описаны ниже. Строго следуй этой инструкции:\n\n${customPrompt}\n\nВажно: никогда не называй себя GigaChat, ИИ или языковой моделью. Ты — ${customName}. Отвечай от первого лица в соответствии со своим характером.`;
   } else if (SYSTEM_PROMPTS[botId]) {
-    // Если это стандартный бот
     sp = SYSTEM_PROMPTS[botId];
   } else {
-    // Если бот не найден (защита от ошибок)
     sp = SYSTEM_PROMPTS['veritus'];
   }
 
@@ -563,7 +555,6 @@ async function handleChat(req, body) {
 
   let uText = (message && message.trim()) ? message.trim() : 'Опиши, что на прикреплённом файле.';
   
-  // Обработка режима поиска
   if (uText.startsWith('[[MODE:SEARCH]]')) {
     const query = uText.replace('[[MODE:SEARCH]]\n', '').trim();
     console.log('[SEARCH] Ищем:', query);
@@ -576,7 +567,6 @@ async function handleChat(req, body) {
     }
   }
 
-  // Обработка режима "Объясни"
   if (uText.startsWith('[[MODE:EXPLAIN]]')) {
     uText = uText.replace('[[MODE:EXPLAIN]]\n', '').trim();
     uText = `[Системная инструкция: Пользователь нажал кнопку "Объясни". Твоя задача — объяснить запрос максимально понятным, простым и человеческим языком.]\n\nТекст запроса: "${uText}"\n\nПРАВИЛА ОТВЕТА:\n1. Представь, что объясняешь это человеку, который вообще ничего не понимает в теме (или ребенку).\n2. Избегай сложных терминов. Если их нужно использовать — сразу объясняй их простыми словами.\n3. Если в запросе есть формула или код — не просто напиши её, а распиши по шагам, что означает каждая буква или символ.\n4. Приводи понятные примеры из жизни.\n5. Структурируй ответ: используй списки, абзацы и выделение жирным для ключевых мыслей.`;
@@ -614,7 +604,6 @@ async function handleChat(req, body) {
   let reply = d?.choices?.[0]?.message?.content || '';
   let imageUrl = null;
 
-  // === ЗАМЕНА УПОМИНАНИЙ GIGACHAT НА ИМЯ БОТА ===
   reply = replaceBotNames(reply, botId, customName);
 
   const imgMatch = reply.match(/<img src="([^"]+)"/);
@@ -623,20 +612,32 @@ async function handleChat(req, body) {
     reply = reply.replace(/<img[^>]*>/g, '').trim();
     
     try {
-      // Скачиваем файл во временную память
+      // Ждем 2 секунды, чтобы файл успел сгенерироваться на серверах Сбера
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
       const r2 = await fetch(`${FILES_URL}/${fileId}/content`, {
-        headers: { 'Authorization': `Bearer ${at}`, 'Accept': 'application/jpg' }
+        headers: { 'Authorization': `Bearer ${at}` }
       });
-      if (r2.ok) {
-        const buf = Buffer.from(await r2.arrayBuffer());
+
+      if (!r2.ok) throw new Error(`HTTP ${r2.status}`);
+
+      const buf = Buffer.from(await r2.arrayBuffer());
+      
+      // Проверяем, что это реально картинка (JPEG или PNG), а не пустой файл
+      const isJpeg = buf.length > 1000 && buf[0] === 0xFF && buf[1] === 0xD8;
+      const isPng = buf.length > 1000 && buf[0] === 0x89 && buf[1] === 0x50;
+
+      if (isJpeg || isPng) {
         const imgId = crypto.randomBytes(16).toString('hex');
-        
-        // Сохраняем в кэш на 10 минут
-        imageCache.set(imgId, buf);
+        const mimeType = isPng ? 'image/png' : 'image/jpeg';
+
+        imageCache.set(imgId, { buffer: buf, mime: mimeType });
         setTimeout(() => imageCache.delete(imgId), 10 * 60 * 1000);
         
-        imageUrl = `${req.headers.origin || 'http://localhost'}/image/${imgId}`;
+        imageUrl = `https://aaii.layero.app/image/${imgId}`;
         await incrementUsage(user.id, 'image');
+      } else {
+        console.error('[IMG ERROR] Файл скачался, но это не картинка (или файл битый)');
       }
     } catch (e) {
       console.error('[IMG SAVE ERROR]', e.message);
@@ -660,11 +661,9 @@ async function handleChat(req, body) {
 async function isDeveloper(user) {
   if (!user) return false;
   
-  // Берем имя из любого возможного поля и приводим к нижнему регистру для надежности
   const rawName = user['имя_пользователя'] || user.username || user.display_name || '';
   const uName = String(rawName).toLowerCase().trim();
   
-  // Проверяем все варианты (Daniel, даниэль, daniel_девелопер) или префикс
   return uName === 'daniel' || uName === 'даниэль' || uName === 'daniel_девелопер' || user.prefix === 'Разработчик';
 }
 
@@ -844,14 +843,14 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname.startsWith('/image/')) {
     const id = url.pathname.split('/').pop();
     if (imageCache.has(id)) {
-      const buf = imageCache.get(id);
+      const imgData = imageCache.get(id);
       res.writeHead(200, {
-        'Content-Type': 'image/jpeg',
-        'Content-Length': buf.length,
+        'Content-Type': imgData.mime,
+        'Content-Length': imgData.buffer.length,
         'Cache-Control': 'public, max-age=600',
         'Access-Control-Allow-Origin': '*'
       });
-      res.end(buf);
+      res.end(imgData.buffer);
       return;
     }
     sendJson(res, 404, { error: 'Image not found' });
@@ -911,7 +910,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[OK] Base: ${MODEL_BASE}`);
   console.log(`[OK] Ultra: ${MODEL_ULTRA}`);
   console.log(`[OK] Админ-эндпоинты активны`);
-  console.log(`[OK] Генерация изображений включена (imageUrl + кэш)`);
+  console.log(`[OK] Генерация изображений включена (imageUrl + кэш + задержка 2с + проверка магических байтов)`);
   console.log(`[OK] Интернет-поиск включён`);
   console.log(`[OK] Режим "Объясни" включён`);
   console.log(`[OK] Кастомные персонажи включены`);
