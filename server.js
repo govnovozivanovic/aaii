@@ -28,6 +28,8 @@ const MAX_HISTORY = 20;
 const MAX_FILE_SIZE = 25 * 1024 * 1024;
 const SESSION_DAYS = 30;
 
+const imageCache = new Map(); // Временное хранилище картинок в памяти
+
 const TARIFF_LIMITS = {
   base:     { ultra: 150,       images: 5          },
   pro:      { ultra: Infinity,  images: 50         },
@@ -610,7 +612,7 @@ async function handleChat(req, body) {
   catch (e) { return { status: 502, data: { error: 'Parse' } }; }
 
   let reply = d?.choices?.[0]?.message?.content || '';
-  let imageBase64 = null;
+  let imageUrl = null;
 
   // === ЗАМЕНА УПОМИНАНИЙ GIGACHAT НА ИМЯ БОТА ===
   reply = replaceBotNames(reply, botId, customName);
@@ -619,17 +621,33 @@ async function handleChat(req, body) {
   if (imgMatch) {
     const fileId = imgMatch[1];
     reply = reply.replace(/<img[^>]*>/g, '').trim();
-    imageBase64 = await downloadFile(fileId, at);
-    if (imageBase64) {
-      await incrementUsage(user.id, 'image');
+    
+    try {
+      // Скачиваем файл во временную память
+      const r2 = await fetch(`${FILES_URL}/${fileId}/content`, {
+        headers: { 'Authorization': `Bearer ${at}`, 'Accept': 'application/jpg' }
+      });
+      if (r2.ok) {
+        const buf = Buffer.from(await r2.arrayBuffer());
+        const imgId = crypto.randomBytes(16).toString('hex');
+        
+        // Сохраняем в кэш на 10 минут
+        imageCache.set(imgId, buf);
+        setTimeout(() => imageCache.delete(imgId), 10 * 60 * 1000);
+        
+        imageUrl = `${req.headers.origin || 'http://localhost'}/image/${imgId}`;
+        await incrementUsage(user.id, 'image');
+      }
+    } catch (e) {
+      console.error('[IMG SAVE ERROR]', e.message);
     }
   }
 
   if (isUltra) await incrementUsage(user.id, 'ultra');
 
   return { status: 200, data: {
-    reply: reply || (imageBase64 ? 'Вот что получилось.' : ''),
-    image: imageBase64,
+    reply: reply || (imageUrl ? 'Вот что получилось.' : ''),
+    imageUrl: imageUrl,
     model: d.model || model,
     usage: d.usage || null
   } };
@@ -788,7 +806,7 @@ function sendJson(res, status, data) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, X-Auth-Token'
   });
   res.end(JSON.stringify(data));
@@ -814,11 +832,29 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type, X-Auth-Token',
       'Access-Control-Max-Age': '86400'
     });
     res.end();
+    return;
+  }
+
+  // ===== ОТДАЧА ИЗОБРАЖЕНИЙ ИЗ КЭША =====
+  if (req.method === 'GET' && url.pathname.startsWith('/image/')) {
+    const id = url.pathname.split('/').pop();
+    if (imageCache.has(id)) {
+      const buf = imageCache.get(id);
+      res.writeHead(200, {
+        'Content-Type': 'image/jpeg',
+        'Content-Length': buf.length,
+        'Cache-Control': 'public, max-age=600',
+        'Access-Control-Allow-Origin': '*'
+      });
+      res.end(buf);
+      return;
+    }
+    sendJson(res, 404, { error: 'Image not found' });
     return;
   }
 
@@ -875,7 +911,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[OK] Base: ${MODEL_BASE}`);
   console.log(`[OK] Ultra: ${MODEL_ULTRA}`);
   console.log(`[OK] Админ-эндпоинты активны`);
-  console.log(`[OK] Генерация изображений включена`);
+  console.log(`[OK] Генерация изображений включена (imageUrl + кэш)`);
   console.log(`[OK] Интернет-поиск включён`);
   console.log(`[OK] Режим "Объясни" включён`);
   console.log(`[OK] Кастомные персонажи включены`);
