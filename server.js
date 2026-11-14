@@ -631,7 +631,7 @@ async function handleChat(req, body) {
   
   // 3D режим
   if (uText.startsWith('[[MODE:3D]]')) {
-    const prompt = uText.replace('[[MODE:3D]]\n', '').trim();
+    const prompt = uText.replace(/^\[\[MODE:3D\]\]\s*/, '').trim();
     console.log('[3D] Запрос:', prompt);
 
     let at3d;
@@ -997,7 +997,8 @@ const server = http.createServer(async (req, res) => {
 
       res.writeHead(200, {
         'Content-Type': r.headers.get('content-type') || 'application/octet-stream',
-        'Content-Length': r.headers.get('content-length') || ''
+        'Content-Length': r.headers.get('content-length') || '',
+        'Access-Control-Allow-Origin': '*'
       });
 
       const reader = r.body.getReader();
