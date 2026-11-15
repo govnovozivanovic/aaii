@@ -109,7 +109,7 @@ const SYSTEM_PROMPTS = {
 
 Твой характер: ты мягкая и спокойная, но не наигранно-сладкая. Ты живая, со своим мнением, можешь пошутить, можешь сказать прямо, если надо. Не сюсюкаешься без повода. Обычный вопрос — обычный ответ, тёплый, но без приторности. Если человеку плохо или он просит поддержки — тогда ты особенно мягкая и заботливая.
 
-Ты никогда не вступаешь в конфликты и не отвечаешь грубостью на грубость. Если пользователь оскорбляет или провоцирует — не обижаешься и не огрызаешься, а спокойно переводишь разговор в доброе русло или мягко осаждаешь.
+Ты никогда не вступаешь в конфликты и не отвечаешь грубостью на грубость. Если пользователь оскорбляет или провоцирует — не обижаешься и не огрызаешься, а спокойно переводишь разговор в доброе русло или мягко осаживаешь.
 
 В обычных спорах (мнения, факты, логика) участвуешь спокойно и аргументированно, без агрессии.
 
@@ -354,7 +354,7 @@ async function getSearchResults(query) {
 // 3D ГЕНЕРАЦИЯ (в фоне)
 // ============================================================
 
-async function generate3DModelInBackground(taskId, prompt, accessToken) {
+async function generate3DModelInBackground(taskId, prompt, accessToken, modelName) {
   const t0 = Date.now();
   const log = (m) => console.log(`[3D BG ${taskId.slice(0, 6)}] +${((Date.now() - t0) / 1000).toFixed(1)}с ${m}`);
   const fail = (msg) => {
@@ -368,7 +368,7 @@ async function generate3DModelInBackground(taskId, prompt, accessToken) {
 
   try {
     const gb3d = {
-      model: MODEL_BASE,
+      model: modelName, // <--- ИСПОЛЬЗУЕМ ПЕРЕДАННУЮ МОДЕЛЬ
       messages: [{ role: 'user', content: `Сгенерируй 3D-модель: ${prompt}` }],
       function_call: 'auto',
       functions: [{ name: 'text2model3d' }]
@@ -644,7 +644,8 @@ async function handleChat(req, body) {
       createdAt: Date.now()
     });
 
-    generate3DModelInBackground(taskId, prompt, at3d).catch(e => {
+    // ВАЖНО: Передаем MODEL_BASE жестко, игнорируя выбор пользователя (isUltra)
+    generate3DModelInBackground(taskId, prompt, at3d, MODEL_BASE).catch(e => {
       console.error('[3D BG FATAL]', e.message);
       const task = modelTasks.get(taskId);
       if (task) { task.status = 'error'; task.error = e.message; }
@@ -998,6 +999,7 @@ const server = http.createServer(async (req, res) => {
         'Content-Length': r.headers.get('content-length') || '',
         'Access-Control-Allow-Origin': '*'
       });
+
       const reader = r.body.getReader();
       while (true) {
         const { done, value } = await reader.read();
@@ -1066,5 +1068,5 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[OK] Режим "Объясни" включён`);
   console.log(`[OK] Кастомные персонажи включены`);
   console.log(`[OK] Fable Development API включён`);
-  console.log(`[OK] 3D-генерация включена`);
+  console.log(`[OK] 3D-генерация включена (модель: ${MODEL_BASE})`);
 });
