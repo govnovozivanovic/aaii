@@ -355,6 +355,17 @@ async function getSearchResults(query) {
 // ============================================================
 
 async function generate3DModelInBackground(taskId, prompt, accessToken) {
+  const t0 = Date.now();
+  const log = (m) => console.log(`[3D BG ${taskId.slice(0, 6)}] +${((Date.now() - t0) / 1000).toFixed(1)}с ${m}`);
+  const fail = (msg) => {
+    const task = modelTasks.get(taskId);
+    if (task) { task.status = 'error'; task.error = msg; }
+  };
+
+  // Таймер живёт ВСЁ время запроса, включая чтение тела ответа (раньше он снимался сразу после заголовков)
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 280000);
+
   try {
     const gb3d = {
       model: MODEL_BASE,
@@ -363,57 +374,44 @@ async function generate3DModelInBackground(taskId, prompt, accessToken) {
       functions: [{ name: 'text2model3d' }]
     };
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 200000);
-
-    let r;
-    try {
-      r = await fetch(API_URL, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(gb3d),
-        signal: controller.signal
-      });
-    } finally {
-      clearTimeout(timer);
-    }
+    log('запрос ушёл в GigaChat: ' + prompt.slice(0, 80));
+    const r = await fetch(API_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(gb3d),
+      signal: controller.signal
+    });
+    log('получены заголовки, HTTP ' + r.status);
 
     if (!r.ok) {
       const errText = await r.text();
       console.error('[3D BG] GigaChat вернул', r.status, errText.slice(0, 300));
-      const task = modelTasks.get(taskId);
-      if (task) { task.status = 'error'; task.error = `GigaChat API: ${r.status}`; }
+      fail(`GigaChat API: ${r.status}`);
       return;
     }
 
     const d = await r.json();
+    log('тело ответа прочитано');
     const content = d?.choices?.[0]?.message?.content || '';
     console.log('[3D BG] content:', content.slice(0, 300));
 
     const match = content.match(/data-model-id="([^"]+)"/);
-    if (!match) {
-      const task = modelTasks.get(taskId);
-      if (task) { task.status = 'error'; task.error = 'GigaChat не вернул data-model-id'; }
-      return;
-    }
+    if (!match) { fail('GigaChat не вернул data-model-id'); return; }
 
     const modelId = match[1];
-    console.log('[3D BG] modelId:', modelId);
-
+    log('modelId: ' + modelId);
     const task = modelTasks.get(taskId);
     if (task) { task.status = 'done'; task.modelId = modelId; }
   } catch (e) {
-    if (e.name === 'AbortError') {
-      const task = modelTasks.get(taskId);
-      if (task) { task.status = 'error'; task.error = 'Таймаут генерации (200 секунд)'; }
-    } else {
-      console.error('[3D BG EXC]', e.message);
-      const task = modelTasks.get(taskId);
-      if (task) { task.status = 'error'; task.error = e.message; }
-    }
+    const code = (e.cause && e.cause.code) || '';
+    log(`ОШИБКА: ${e.name} / ${e.message} / ${code}`);
+    if (e.name === 'AbortError') fail('Таймаут генерации (280 секунд)');
+    else fail(e.message + (code ? ` (${code})` : ''));
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -1000,7 +998,6 @@ const server = http.createServer(async (req, res) => {
         'Content-Length': r.headers.get('content-length') || '',
         'Access-Control-Allow-Origin': '*'
       });
-
       const reader = r.body.getReader();
       while (true) {
         const { done, value } = await reader.read();
